@@ -1,0 +1,56 @@
+[package]
+name = "plugx"
+version = "0.1.0"
+description = "Modular, extensible and observable plugin framework: namespaced hooks, C-ABI plugins"
+edition = "2024"
+rust-version = "1.88"
+license = "BSD-3-Clause"
+repository = "https://github.com/plugx-rs/plugx"
+readme = "README.md"
+homepage = "https://crates.io/crates/plugx"
+documentation = "https://docs.rs/plugx"
+categories = ["development-tools", "api-bindings"]
+keywords = ["plugin", "hook", "extension", "ffi", "abi"]
+include = ["src/**/*.rs", "Cargo.toml", "README.md", "LICENSE"]
+
+[dependencies]
+cfg-if = "1.0.0"
+libloading = { version = "0.8.5", optional = true }
+log = { version = "0.4.20", optional = true }
+tracing = { version = "0.1.40", optional = true }
+tanzim-validate = { version = "0.13.0", optional = true, default-features = false, features = ["schema"] }
+
+[features]
+# The library-author surface (hooks, run) is always on. Everything below is
+# for application authors, plugin authors, and tests.
+default = []
+plugin = []
+host = ["plugin"]
+sdk = ["plugin"]
+load-cdylib = ["host", "dep:libloading"]
+load-wasm = ["host"]
+load-starlark = ["host"]
+load-js = ["host"]
+load-http = ["host"]
+config-tanzim = ["host", "dep:tanzim-validate"]
+testing = []
+logging = ["dep:log"]
+tracing = ["dep:tracing"]
+full = ["host", "sdk", "load-cdylib", "load-wasm", "load-starlark", "load-js", "load-http", "config-tanzim", "testing"]
+
+[[example]]
+name = "echo_plugin"
+crate-type = ["cdylib"]
+required-features = ["sdk"]
+
+[[example]]
+name = "caller_plugin"
+crate-type = ["cdylib"]
+required-features = ["sdk"]
+
+[[example]]
+name = "demo"
+required-features = ["load-cdylib"]
+
+[package.metadata.docs.rs]
+all-features = true

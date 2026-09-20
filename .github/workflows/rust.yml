@@ -1,0 +1,114 @@
+name: Rust
+
+on:
+  push:
+    branches:
+      - "master"
+  pull_request:
+    branches:
+      - "master"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  msrv:
+    name: MSRV (1.88)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Keep in sync with `rust-version` in Cargo.toml. 1.88 is the
+      # floor because of let-chains, not the 2024 edition (which only needs 1.85).
+      - uses: dtolnay/rust-toolchain@1.88
+      - name: Check
+        run: cargo check --all-features
+
+  style:
+    name: Check Style
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check style
+        run: make check-style
+
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Documentation
+        run: make docs
+
+  clippy:
+    name: Lint (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux
+          - os: macos-latest
+            name: macos
+          - os: windows-latest
+            name: windows
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install make (Windows)
+        if: runner.os == 'Windows'
+        run: choco install make --no-progress -y
+      - name: Clippy
+        run: make clippy
+
+  test:
+    name: Test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux
+          - os: macos-latest
+            name: macos
+          - os: windows-latest
+            name: windows
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install make (Windows)
+        if: runner.os == 'Windows'
+        run: choco install make --no-progress -y
+      - name: Test
+        run: make test
+
+  examples:
+    name: Examples (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux
+          - os: macos-latest
+            name: macos
+          - os: windows-latest
+            name: windows
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install make (Windows)
+        if: runner.os == 'Windows'
+        run: choco install make --no-progress -y
+      - name: Examples
+        run: |
+          make examples
+          ls -sh ./bin

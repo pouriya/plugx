@@ -1,0 +1,5 @@
+**/target
+/bin
+/Cargo.lock
+/.idea
+.claude
