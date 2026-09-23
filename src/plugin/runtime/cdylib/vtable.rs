@@ -469,7 +469,7 @@ unsafe extern "C" fn register_transform(
                 return Status::Error;
             }
         };
-        let owner = match registry.interned(&owner) {
+        let owner = match registry.known_name(&owner) {
             Some(owner) => owner,
             None => {
                 set_last_error("no plugin of that name is loaded here");
@@ -521,7 +521,7 @@ unsafe extern "C" fn register_observe(
                 return Status::Error;
             }
         };
-        let owner = match registry.interned(&owner) {
+        let owner = match registry.known_name(&owner) {
             Some(owner) => owner,
             None => {
                 set_last_error("no plugin of that name is loaded here");
@@ -557,7 +557,7 @@ unsafe extern "C" fn unregister(host_data: *mut c_void, owner: Slice, id: u64) -
             Some(owner) => owner,
             None => return Status::Error,
         };
-        let owner = match registry.interned(&owner) {
+        let owner = match registry.known_name(&owner) {
             Some(owner) => owner,
             None => return Status::Error,
         };
@@ -674,7 +674,7 @@ unsafe extern "C" fn export(
                 return Status::Error;
             }
         };
-        let owner = match registry.interned(&owner) {
+        let owner = match registry.known_name(&owner) {
             Some(owner) => owner,
             None => {
                 set_last_error("no plugin of that name is loaded here");
@@ -705,7 +705,7 @@ unsafe extern "C" fn unexport(host_data: *mut c_void, owner: Slice, id: u64) -> 
             Some(owner) => owner,
             None => return Status::Error,
         };
-        let owner = match registry.interned(&owner) {
+        let owner = match registry.known_name(&owner) {
             Some(owner) => owner,
             None => return Status::Error,
         };

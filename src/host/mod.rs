@@ -27,7 +27,7 @@
 //! # Stopping is an ordered sequence, and the order is the point
 //!
 //! ```text
-//!   1. retire   — take the plugin's callbacks and exported functions out of the registry
+//!   1. drain    — take the plugin's callbacks and exported functions out of the registry
 //!   2. quiesce  — wait for dispatches and calls that started before step 1 to finish
 //!   3. drop     — free them, while the plugin's code is still mapped
 //!   4. stop     — only now tell the plugin to tear its own state down
@@ -306,7 +306,7 @@ impl Host {
     /// The application's own context.
     ///
     /// Hand it to anything of yours that fires hooks, and use it to register the application's own
-    /// callbacks. Registrations made through it are tagged `host` and are never retired.
+    /// callbacks. Registrations made through it are tagged `host` and are never drained.
     pub const fn context(&self) -> Context {
         Context::direct(HOST_NAME, self.registry)
     }
@@ -540,13 +540,13 @@ impl Host {
 
         // 1. Take the callbacks and the exported functions out of the registry. A dispatch or a call
         //    starting now cannot see them.
-        let retired = registry.retire(managed.name);
-        let callback_count = retired.callback_count();
-        let function_count = retired.function_count();
+        let drained = registry.drain(managed.name);
+        let callback_count = drained.callback_count();
+        let function_count = drained.function_count();
 
         // 2 and 3. Wait for dispatches and calls that started *before* step 1, then drop what was
         //    removed — while the plugin's library is still mapped, which it always is.
-        if let Err(source) = retired.wait(stop_timeout) {
+        if let Err(source) = drained.wait(stop_timeout) {
             return Err(Error::Drain {
                 plugin: managed.name.into(),
                 source: Box::new(source),

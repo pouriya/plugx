@@ -773,27 +773,27 @@ impl Registry {
     /// A plugin's name is leaked once, when it is loaded. Everything it registers afterwards — from
     /// inside a shared library, where the name arrives as borrowed bytes — is tagged with that same
     /// `&'static str`, so identity stays a pointer the tables already own.
-    pub(crate) fn interned(&self, plugin: &str) -> Option<&'static str> {
+    pub(crate) fn known_name(&self, plugin: &str) -> Option<&'static str> {
         let guard = match self.states.read() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        let mut interned = None;
+        let mut found = None;
         for (name, _) in &guard.plugin_list {
             if *name == plugin {
-                interned = Some(*name);
+                found = Some(*name);
                 break;
             }
         }
-        interned
+        found
     }
 
     /// Take every callback and every exported function owned by `owner` out of the tables.
     ///
-    /// This is step one of the stop sequence: drain, quiesce ([`Retired::wait`]), drop, *then* stop
-    /// the plugin. Calling the plugin's `stop` before the returned [`Retired`] has been waited on
+    /// This is step one of the stop sequence: drain, quiesce ([`Drained::wait`]), drop, *then* stop
+    /// the plugin. Calling the plugin's `stop` before the returned [`Drained`] has been waited on
     /// lets a callback or a function run against state the plugin has already torn down.
-    pub(crate) fn retire(&self, owner: &'static str) -> Retired {
+    pub(crate) fn drain(&self, owner: &'static str) -> Drained {
         let hooks_previous = {
             let mut guard = self.write_hooks();
             let mut next = (**guard).clone();
@@ -814,21 +814,21 @@ impl Registry {
         cfg_if! {
             if #[cfg(feature = "tracing")] {
                 tracing::debug!(
-                    msg = "Retired an owner from the tables",
+                    msg = "Drained an owner from the tables",
                     plugin = owner,
                     callback_count = hooks_previous.1.len(),
                     function_count = apis_previous.1.len()
                 );
             } else if #[cfg(feature = "logging")] {
                 log::debug!(
-                    "msg=\"Retired an owner from the tables\" plugin={owner} \
+                    "msg=\"Drained an owner from the tables\" plugin={owner} \
                      callback_count={} function_count={}",
                     hooks_previous.1.len(),
                     apis_previous.1.len()
                 );
             }
         }
-        Retired {
+        Drained {
             hooks: hooks_previous.0,
             apis: apis_previous.0,
             callback_list: hooks_previous.1,
@@ -842,9 +842,9 @@ impl Registry {
 ///
 /// This is the first half of a stop. They are already unreachable — a dispatch or a call starting
 /// now cannot see them — but one that started *before* the swap may still be running. They are only
-/// safe to drop once every such caller has finished, which is what [`Retired::wait`] establishes.
-#[must_use = "the retired callbacks are not dropped until `wait` says it is safe"]
-pub(crate) struct Retired {
+/// safe to drop once every such caller has finished, which is what [`Drained::wait`] establishes.
+#[must_use = "the drained callbacks are not dropped until `wait` says it is safe"]
+pub(crate) struct Drained {
     hooks: Arc<HookTable>,
     apis: Arc<ApiTable>,
     callback_list: Vec<Entry>,
@@ -852,7 +852,7 @@ pub(crate) struct Retired {
     owner: &'static str,
 }
 
-impl Retired {
+impl Drained {
     /// How many callbacks were taken out of the hook table.
     pub(crate) fn callback_count(&self) -> usize {
         self.callback_list.len()
@@ -908,14 +908,15 @@ impl Retired {
         cfg_if! {
             if #[cfg(feature = "tracing")] {
                 tracing::debug!(
-                    msg = "Drained an owner",
+                    msg = "Dropped a drained owner's entries",
                     plugin = self.owner,
                     callback_count = self.callback_list.len(),
                     function_count = self.function_list.len()
                 );
             } else if #[cfg(feature = "logging")] {
                 log::debug!(
-                    "msg=\"Drained an owner\" plugin={} callback_count={} function_count={}",
+                    "msg=\"Dropped a drained owner's entries\" plugin={} \
+                     callback_count={} function_count={}",
                     self.owner,
                     self.callback_list.len(),
                     self.function_list.len()

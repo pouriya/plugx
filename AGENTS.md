@@ -26,7 +26,7 @@ default, so a library author that only fires hooks compiles the always-on module
 | `abi` | — | `AbiVersion`, plus one submodule per plugin kind. `abi::cdylib` is the frozen `repr(C)` contract (vtables, entry symbols) |
 | `error` | — | One `Error` for everything a `Context` can fail at |
 | `context` | — | `Context`, `HostAccess` and `HostOps` — the whole plugin-author surface, naming no plugin kind |
-| `registry` | — | `Registry`: the four tables one host owns, the one slot holding this program's, the free `run`, plus `retire` / `Retired` (`ApiFn`, `State`) |
+| `registry` | — | `Registry`: the four tables one host owns, the one slot holding this program's, the free `run`, plus `drain` / `Drained` (`ApiFn`, `State`) |
 | `hook` | — | Declaring hooks and the two callback traits (`Hook`, `Transform`, `Observe`, `Flow`) |
 | `plugin` | `plugin` | The plugin contract (`Plugin`, `Info`, `ConfigSpec`, `Dependency`), plus one submodule per kind |
 | `plugin::load` | `host` | Axis one, transport: the `Loader` contract, `Artifact`, `Content` |
@@ -65,8 +65,8 @@ process.
 - **No lock is ever held while a callback or an exported function executes.** Dispatch and
   `plugin_call` snapshot the table (brief read lock), release, *then* invoke. Holding across
   execution deadlocks the moment a callback registers another callback or calls a second plugin.
-- **The stop sequence is drain → quiesce → `drop_fn` → `Plugin::stop` → leak.** One `retire` takes
-  both the callbacks *and* the exported functions out, and `Retired::wait` quiesces both. Calling
+- **The stop sequence is drain → quiesce → `drop_fn` → `Plugin::stop` → leak.** One `drain` takes
+  both the callbacks *and* the exported functions out, and `Drained::wait` quiesces both. Calling
   `Plugin::stop` before in-flight dispatches and calls have drained means code runs against a
   plugin that already tore down its state.
 - **Never `dlclose`.** A stopped plugin's library stays mapped for the life of the process. Code
