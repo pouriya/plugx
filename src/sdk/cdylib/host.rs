@@ -13,7 +13,7 @@
 //! never has to invalidate them.
 
 use crate::abi::cdylib::{
-    ApiFunction, Callback, HostApi, Str, Status, ValueApi, ValueHandle, marshal,
+    ApiFunction, Callback, HostApi, Status, Str, ValueApi, ValueHandle, marshal,
 };
 use crate::context::{Context, HostOps};
 use crate::error::{Error, Result};
@@ -73,6 +73,30 @@ impl HostRef {
             match slice.to_string_lossless() {
                 Some(message) => message.into_boxed_str(),
                 None => Box::from(""),
+            }
+        }
+    }
+
+    /// Hand the host whatever a callback recorded on its way out, and take back the status that
+    /// callback should return.
+    ///
+    /// The two failing arms do not invent a code: `continue_with_error` and `stop_with_error`
+    /// return the one the ABI wants, so the message and the code come from the same call and
+    /// cannot get out of step.
+    fn report(&self, flow: Flow) -> Status {
+        match flow {
+            Flow::Continue(Ok(())) => Status::Ok,
+            Flow::Stop(Ok(())) => Status::Stop,
+            Flow::Continue(Err(error)) => {
+                let message = error.to_string();
+                // SAFETY: module contract. `message` is a local that outlives the call, which is
+                // the lifetime the ABI gives the borrow.
+                unsafe { (self.api().continue_with_error)(self.data, Str::from_str(&message)) }
+            }
+            Flow::Stop(Err(error)) => {
+                let message = error.to_string();
+                // SAFETY: see the arm above.
+                unsafe { (self.api().stop_with_error)(self.data, Str::from_str(&message)) }
             }
         }
     }
@@ -142,7 +166,7 @@ impl HostOps for HostRef {
     /// The payload is copied into a host-owned tree, dispatched, and copied back. That round trip
     /// is the price of the two sides not sharing an allocator — and it is the same price a
     /// WebAssembly or Starlark plugin pays, so there is one code path for all of them.
-    fn run(&self, hook: &str, data: &mut Value) -> Result<Flow> {
+    fn run(&self, hook: &str, data: &mut Value) -> Result<()> {
         let api = self.value_api();
         // SAFETY: module contract. `handle` is owned here and released on every path below.
         unsafe {
@@ -162,10 +186,7 @@ impl HostOps for HostRef {
                     if let Some(updated) = updated {
                         *data = updated;
                     }
-                    match status {
-                        Status::Stop => Ok(Flow::Stop),
-                        _ => Ok(Flow::Continue),
-                    }
+                    Ok(())
                 }
                 _ => Err(Error::Ffi {
                     operation: hook.into(),
@@ -185,7 +206,7 @@ impl HostOps for HostRef {
         let closure = Box::new(TransformClosure {
             callback,
             context,
-            api: self.value_api(),
+            host: *self,
         });
         let record = Callback {
             call: invoke_transform,
@@ -225,7 +246,7 @@ impl HostOps for HostRef {
         let closure = Box::new(ObserveClosure {
             callback,
             context,
-            api: self.value_api(),
+            host: *self,
         });
         let record = Callback {
             call: invoke_observe,
@@ -256,9 +277,8 @@ impl HostOps for HostRef {
     fn unregister(&self, owner: &str, registration: RegistrationId) -> bool {
         // SAFETY: module contract. `owner` is borrowed for this call only, which is what `Str`
         // documents.
-        let status = unsafe {
-            (self.api().unregister)(self.data, Str::from_str(owner), registration.get())
-        };
+        let status =
+            unsafe { (self.api().unregister)(self.data, Str::from_str(owner), registration.get()) };
         status == Status::Ok
     }
 
@@ -271,7 +291,7 @@ impl HostOps for HostRef {
         let closure = Box::new(FunctionClosure {
             function,
             context,
-            api: self.value_api(),
+            host: *self,
         });
         let record = ApiFunction {
             call: invoke_function,
@@ -330,21 +350,21 @@ impl HostOps for HostRef {
 struct TransformClosure {
     callback: Arc<dyn Transform>,
     context: Context,
-    api: &'static ValueApi,
+    host: HostRef,
 }
 
 /// A Rust [`Observe`] plus everything [`invoke_observe`] needs to call it.
 struct ObserveClosure {
     callback: Arc<dyn Observe>,
     context: Context,
-    api: &'static ValueApi,
+    host: HostRef,
 }
 
 /// A Rust [`ApiFn`] plus everything [`invoke_function`] needs to call it.
 struct FunctionClosure {
     function: Arc<dyn ApiFn>,
     context: Context,
-    api: &'static ValueApi,
+    host: HostRef,
 }
 
 /// Frees one of the closures above once the host has drained it out of its table.
@@ -374,22 +394,17 @@ unsafe extern "C" fn invoke_transform(user_data: *mut c_void, data: *mut ValueHa
     // A panic unwinding out of an `extern "C"` frame aborts the host. Catch it here and report a
     // plain error instead: one misbehaving plugin should not take the process down.
     let outcome = catch_unwind(AssertUnwindSafe(|| {
+        let api = closure.host.value_api();
         // SAFETY: `data` is the dispatching side's live payload handle, valid for this call.
-        let mut value = match unsafe { marshal::from_handle(closure.api, data) } {
+        let mut value = match unsafe { marshal::from_handle(api, data) } {
             Some(value) => value,
             None => return Status::Error,
         };
-        let flow = match closure.callback.call(&closure.context, &mut value) {
-            Ok(flow) => flow,
-            Err(_) => return Status::Error,
-        };
+        let flow = closure.callback.call(&closure.context, &mut value);
         // SAFETY: as above; the transform may have rewritten `value`, so copy it back.
-        let written = unsafe { marshal::write_back(closure.api, data, &value) };
+        let written = unsafe { marshal::write_back(api, data, &value) };
         match written {
-            Status::Ok => match flow {
-                Flow::Continue => Status::Ok,
-                Flow::Stop => Status::Stop,
-            },
+            Status::Ok => closure.host.report(flow),
             other => other,
         }
     }));
@@ -411,15 +426,12 @@ unsafe extern "C" fn invoke_observe(user_data: *mut c_void, data: *mut ValueHand
     let outcome = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: `data` is the dispatching side's live payload handle, valid for this call. An
         // observe callback only reads it, so nothing is written back.
-        let value = match unsafe { marshal::from_handle(closure.api, data) } {
+        let value = match unsafe { marshal::from_handle(closure.host.value_api(), data) } {
             Some(value) => value,
             None => return Status::Error,
         };
-        match closure.callback.call(&closure.context, &value) {
-            Ok(Flow::Continue) => Status::Ok,
-            Ok(Flow::Stop) => Status::Stop,
-            Err(_) => Status::Error,
-        }
+        let flow = closure.callback.call(&closure.context, &value);
+        closure.host.report(flow)
     }));
     match outcome {
         Ok(status) => status,
@@ -442,8 +454,9 @@ unsafe extern "C" fn invoke_function(
     // SAFETY: see `invoke_transform`; the host passes back the `user_data` from the export.
     let closure = unsafe { &*user_data.cast::<FunctionClosure>() };
     let outcome = catch_unwind(AssertUnwindSafe(|| {
+        let api = closure.host.value_api();
         // SAFETY: `args` borrows the caller's tree for this call only.
-        let arguments = match unsafe { marshal::from_handle(closure.api, args) } {
+        let arguments = match unsafe { marshal::from_handle(api, args) } {
             Some(arguments) => arguments,
             None => return Status::Error,
         };
@@ -454,10 +467,10 @@ unsafe extern "C" fn invoke_function(
             Err(Error::Failed { error, .. }) => (*error, Status::Error),
             Err(error) => (Value::Str(error.to_string()), Status::Error),
         };
-        // SAFETY: `closure.api` is the host's, valid for the process; ownership of the handle passes
-        // to the host through `out`, which was checked non-null above.
+        // SAFETY: `api` is the host's, valid for the process; ownership of the handle passes to
+        // the host through `out`, which was checked non-null above.
         unsafe {
-            let handle = marshal::to_handle(closure.api, &value);
+            let handle = marshal::to_handle(api, &value);
             if handle.is_null() {
                 return Status::Error;
             }

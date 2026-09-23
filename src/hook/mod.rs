@@ -7,12 +7,12 @@
 //! somebody else — the application, or a plugin the application loaded — decide what happens.
 //!
 //! ```rust
-//! use plugx::{Context, Flow, Value};
+//! use plugx::{Context, Value};
 //!
 //! plugx::hook!(pub REQUEST_HEADERS = "request.headers");
 //!
 //! /// Anything that can be extended takes a context and fires through it.
-//! fn handle(context: &Context) -> plugx::Result<Flow> {
+//! fn handle(context: &Context) -> plugx::Result<()> {
 //!     let mut headers = Value::map();
 //!     context.run(&REQUEST_HEADERS, &mut headers)
 //! }
@@ -29,7 +29,8 @@
 //!
 //! A [`Transform`] receives `&mut Value` and may rewrite the payload. An [`Observe`] receives
 //! `&Value` and may only react. Both share one priority-ordered list per hook, so they interleave
-//! however you schedule them, and either can end the dispatch early by returning [`Flow::Stop`].
+//! however you schedule them, and both answer with a [`Flow`] — where the dispatch goes next, and
+//! whether this callback failed, which are independent of each other.
 //!
 //! # Dispatch holds no lock
 //!

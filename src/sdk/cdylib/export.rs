@@ -9,7 +9,7 @@
 //! `HostApi`, `host_data` and `plugin_name` outlive the process. A host guarantees that by never
 //! unloading a plugin library.
 
-use crate::abi::cdylib::{ABI_VERSION, Context, Str, Status, ValueApi, ValueHandle, marshal};
+use crate::abi::cdylib::{ABI_VERSION, Context, Status, Str, ValueApi, ValueHandle, marshal};
 use crate::context::Context as PluginContext;
 use crate::plugin::{Info, Plugin};
 use crate::value::Value;

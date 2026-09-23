@@ -5,7 +5,7 @@ use crate::abi::cdylib::AbiVersion;
 /// A plugin reports the version it was compiled against; a host refuses to load a plugin whose
 /// [`AbiVersion::major`] differs from its own.
 pub const ABI_VERSION: AbiVersion = AbiVersion {
-    major: 2,
+    major: 3,
     minor: 0,
     patch: 0,
 };
@@ -96,14 +96,25 @@ impl Str {
 ///
 /// Negative values are failures; a receiver that sees an unknown negative treats it as
 /// [`Status::Error`].
+///
+/// A hook callback answers with all four of the non-negative-or-`Error` codes, because it is
+/// saying two things at once — where dispatch goes next, and whether it failed. [`Ok`](Self::Ok)
+/// is carry on, [`Stop`](Self::Stop) is end here, [`ContinueError`](Self::ContinueError) is carry
+/// on having failed, and [`Error`](Self::Error) is end here having failed. The two failing codes
+/// are what `continue_with_error` and `stop_with_error` return, so a callback never writes them
+/// out by hand.
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
-    /// Succeeded; keep going.
+    /// Succeeded; from a callback, keep going.
     Ok = 0,
-    /// Succeeded, and no further callback should run for this hook.
+    /// From a callback: end the dispatch here, having succeeded.
     Stop = 1,
-    /// Failed. The caller reads the detail with the host's error accessor.
+    /// From a callback: keep going, but this one failed and recorded why with
+    /// `continue_with_error`.
+    ContinueError = 2,
+    /// Failed. From a callback: end the dispatch here, with the error recorded by
+    /// `stop_with_error`.
     Error = -1,
     /// The plugin does not implement the requested operation.
     Unsupported = -2,
@@ -117,6 +128,7 @@ impl Status {
         match code {
             0 => Self::Ok,
             1 => Self::Stop,
+            2 => Self::ContinueError,
             -2 => Self::Unsupported,
             -3 => Self::Incompatible,
             _ => Self::Error,

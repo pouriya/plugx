@@ -18,7 +18,7 @@
 //!             if let Some(map) = data.as_map_mut() {
 //!                 map.insert("password", Value::Str("[redacted]".into()));
 //!             }
-//!             Ok(Flow::Continue)
+//!             Flow::Continue(Ok(()))
 //!         })?;
 //!         context.export("redact", |_: &Context, args: Value| Ok(args))?;
 //!         Ok(())

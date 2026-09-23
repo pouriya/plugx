@@ -479,9 +479,9 @@ impl Registry {
         access: HostAccess,
         hook: HookRef<'_>,
         data: &mut Value,
-    ) -> Result<Flow> {
+    ) -> Result<()> {
         if self.filter.load(Ordering::Relaxed) & hook.bit() == 0 {
-            return Ok(Flow::Continue);
+            return Ok(());
         }
         let snapshot = {
             let guard = self.read_hooks();
@@ -489,12 +489,12 @@ impl Registry {
         };
         let position = match snapshot.position_of(hook) {
             Some(position) => position,
-            None => return Ok(Flow::Continue),
+            None => return Ok(()),
         };
         let entry_list = &snapshot.hook_list[position].entry_list;
         let total = entry_list.len();
         if total == 0 {
-            return Ok(Flow::Continue);
+            return Ok(());
         }
 
         cfg_if! {
@@ -516,25 +516,57 @@ impl Registry {
         for entry in entry_list {
             let callee = Context::new(entry.owner, access);
             let flow = match &entry.callback {
-                CallbackKind::Transform(callback) => callback.call(&callee, data)?,
-                CallbackKind::Observe(callback) => callback.call(&callee, data)?,
+                CallbackKind::Transform(callback) => callback.call(&callee, data),
+                CallbackKind::Observe(callback) => callback.call(&callee, data),
             };
-            if flow == Flow::Stop {
-                cfg_if! {
-                    if #[cfg(feature = "tracing")] {
-                        tracing::trace!(msg = "Callback stopped the dispatch", plugin = entry.owner);
-                    } else if #[cfg(feature = "logging")] {
-                        log::trace!(
-                            "msg=\"Callback stopped the dispatch\" hook={} plugin={}",
-                            hook.name(),
-                            entry.owner
-                        );
+            match flow {
+                Flow::Continue(Ok(())) => {}
+                // The callback failed and said so, but asked not to end the dispatch. That is a
+                // failure this library tolerates on the plugin's behalf, so it is logged here and
+                // never reaches whoever fired the hook — the only place it would otherwise go.
+                Flow::Continue(Err(error)) => {
+                    cfg_if! {
+                        if #[cfg(feature = "tracing")] {
+                            tracing::warn!(
+                                msg = "Callback failed and let the dispatch continue",
+                                plugin = entry.owner,
+                                error = ?error
+                            );
+                        } else if #[cfg(feature = "logging")] {
+                            log::warn!(
+                                "msg=\"Callback failed and let the dispatch continue\" hook={} \
+                                 plugin={} error={error:?}",
+                                hook.name(),
+                                entry.owner
+                            );
+                        } else {
+                            let _ = error;
+                        }
                     }
                 }
-                return Ok(Flow::Stop);
+                Flow::Stop(result) => {
+                    cfg_if! {
+                        if #[cfg(feature = "tracing")] {
+                            tracing::trace!(
+                                msg = "Callback stopped the dispatch",
+                                plugin = entry.owner,
+                                failed = result.is_err()
+                            );
+                        } else if #[cfg(feature = "logging")] {
+                            log::trace!(
+                                "msg=\"Callback stopped the dispatch\" hook={} plugin={} \
+                                 failed={}",
+                                hook.name(),
+                                entry.owner,
+                                result.is_err()
+                            );
+                        }
+                    }
+                    return result;
+                }
             }
         }
-        Ok(Flow::Continue)
+        Ok(())
     }
 
     // ---- functions ------------------------------------------------------------------------
@@ -978,7 +1010,7 @@ pub(crate) fn uninstall(registry: &'static Registry) {
 /// ```rust,ignore
 /// plugx::run("request.headers", &mut headers)?;
 /// ```
-pub fn run<'a>(hook: impl Into<HookRef<'a>>, data: &mut Value) -> Result<Flow> {
+pub fn run<'a>(hook: impl Into<HookRef<'a>>, data: &mut Value) -> Result<()> {
     let pointer = REGISTRY.load(Ordering::Acquire);
     if pointer.is_null() {
         return Err(Error::NotInitialized);

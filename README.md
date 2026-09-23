@@ -91,7 +91,7 @@ per process — a second one is refused until the first is dropped.
 ```rust
 plugx::hook!(pub REQUEST_HEADERS = "request.headers");
 
-fn handle(headers: &mut Value) -> plugx::Result<Flow> {
+fn handle(headers: &mut Value) -> plugx::Result<()> {
     plugx::run(&REQUEST_HEADERS, headers)           // a &str works too
 }
 ```
@@ -136,7 +136,17 @@ not detected — that one is the plugin author's.
 
 A **`Transform`** receives `&mut Value` and may rewrite the payload. An **`Observe`** receives
 `&Value` and may only react. They share one priority-ordered list per hook, so they interleave
-however you schedule them, and either can end a dispatch by returning `Flow::Stop`.
+however you schedule them.
+
+Both answer with a `Flow`, which says two independent things: whether to run the next callback, and
+whether this one failed.
+
+```rust
+Flow::Continue(Ok(()))      // carry on
+Flow::Continue(Err(error))  // carry on; logged against this plugin, goes no further
+Flow::Stop(Ok(()))          // end the dispatch; `run` returns Ok(())
+Flow::Stop(Err(error))      // end the dispatch; `run` returns Err(error)
+```
 
 ## Development
 

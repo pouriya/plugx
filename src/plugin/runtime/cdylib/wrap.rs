@@ -5,14 +5,37 @@
 //! happens inside the plugin's own `invoke_*` entry point, where it has to.
 
 use crate::abi::cdylib::{
-    ApiFunction, Callback, Context as AbiContext, InfoFn, LastErrorFn, ReloadFn, Str, StartFn,
-    Status, StopFn, ValueHandle,
+    ApiFunction, Callback, Context as AbiContext, InfoFn, LastErrorFn, ReloadFn, StartFn, Status,
+    StopFn, Str, ValueHandle,
 };
 use crate::context::Context;
 use crate::hook::{Flow, Observe, Transform};
 use crate::plugin::{Error, Info, Plugin, Result};
 use crate::registry::ApiFn;
 use crate::value::Value;
+
+/// Turn a callback's status, and whatever it recorded on its way out, into a [`Flow`].
+///
+/// The two failing codes carry nothing of their own: the message went into the host's slot the
+/// moment the callback called `continue_with_error` or `stop_with_error`, and this is where it is
+/// picked up again. A plugin that returns a failing code without going through either helper
+/// simply has nothing to say, and the error reads that way.
+fn flow_of(status: Status, context: &Context) -> Flow {
+    match status {
+        Status::Ok => Flow::Continue(Ok(())),
+        Status::Stop => Flow::Stop(Ok(())),
+        Status::ContinueError => Flow::Continue(Err(callback_error(context))),
+        _ => Flow::Stop(Err(callback_error(context))),
+    }
+}
+
+/// The error a failing callback left behind, attributed to the plugin that ran it.
+fn callback_error(context: &Context) -> crate::Error {
+    crate::Error::Ffi {
+        operation: context.name().into(),
+        message: super::vtable::take_callback_error().into_boxed_str(),
+    }
+}
 
 /// Asks a plugin why its last call failed, when it bothered to say.
 fn plugin_message(symbols: &PluginSymbols) -> String {
@@ -56,21 +79,14 @@ impl FfiTransform {
 }
 
 impl Transform for FfiTransform {
-    fn call(&self, context: &Context, data: &mut Value) -> crate::Result<Flow> {
+    fn call(&self, context: &Context, data: &mut Value) -> Flow {
         let handle = std::ptr::from_mut(data).cast::<ValueHandle>();
         // SAFETY: `handle` borrows the payload for exactly this call, which is what `CallbackFn`
         // documents. `user_data` is the pointer the plugin registered and has not been dropped:
         // the registry only drops a callback after draining it and waiting for in-flight dispatches,
         // so no dispatch can reach a dropped one.
         let status = unsafe { (self.callback.call)(self.callback.user_data, handle) };
-        match status {
-            Status::Ok => Ok(Flow::Continue),
-            Status::Stop => Ok(Flow::Stop),
-            _ => Err(crate::Error::Ffi {
-                operation: context.name().into(),
-                message: "the plugin's callback failed".into(),
-            }),
-        }
+        flow_of(status, context)
     }
 }
 
@@ -98,7 +114,7 @@ impl FfiObserve {
 }
 
 impl Observe for FfiObserve {
-    fn call(&self, context: &Context, data: &Value) -> crate::Result<Flow> {
+    fn call(&self, context: &Context, data: &Value) -> Flow {
         // The ABI has one callback signature, so an observe callback is handed the same pointer a
         // transform would get. The `&Value` here is what makes it read-only: the plugin side wraps
         // it in an `Observe`, which never writes back.
@@ -106,14 +122,7 @@ impl Observe for FfiObserve {
         // SAFETY: as `FfiTransform::call`, except the callback is registered as an observer and
         // documented not to write through the handle.
         let status = unsafe { (self.callback.call)(self.callback.user_data, handle) };
-        match status {
-            Status::Ok => Ok(Flow::Continue),
-            Status::Stop => Ok(Flow::Stop),
-            _ => Err(crate::Error::Ffi {
-                operation: context.name().into(),
-                message: "the plugin's callback failed".into(),
-            }),
-        }
+        flow_of(status, context)
     }
 }
 

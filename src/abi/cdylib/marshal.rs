@@ -1,4 +1,4 @@
-use crate::abi::cdylib::primitive::{Str, Status};
+use crate::abi::cdylib::primitive::{Status, Str};
 use crate::abi::cdylib::value::{ValueApi, ValueHandle};
 use crate::value::{Kind, Map, Value};
 

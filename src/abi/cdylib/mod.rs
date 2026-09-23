@@ -39,5 +39,5 @@ pub use plugin::{
     INFO_SYMBOL, InfoFn, LAST_ERROR_SYMBOL, LastErrorFn, RELOAD_SYMBOL, ReloadFn, START_SYMBOL,
     STOP_SYMBOL, StartFn, StopFn, VERSION_SYMBOL, VersionFn,
 };
-pub use primitive::{ABI_VERSION, Str, Status};
+pub use primitive::{ABI_VERSION, Status, Str};
 pub use value::{ValueApi, ValueHandle};

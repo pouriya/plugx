@@ -13,7 +13,7 @@ use self::vtable::HOST_API;
 use self::wrap::{FfiPlugin, PluginSymbols};
 use crate::abi::cdylib::{
     ABI_VERSION, Context, INFO_SYMBOL, InfoFn, LAST_ERROR_SYMBOL, LastErrorFn, RELOAD_SYMBOL,
-    ReloadFn, START_SYMBOL, STOP_SYMBOL, Str, StartFn, StopFn, VERSION_SYMBOL, VersionFn,
+    ReloadFn, START_SYMBOL, STOP_SYMBOL, StartFn, StopFn, Str, VERSION_SYMBOL, VersionFn,
 };
 use crate::plugin::Plugin;
 use crate::plugin::load::{Artifact, Content};

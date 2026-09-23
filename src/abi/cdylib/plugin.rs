@@ -1,6 +1,6 @@
 use crate::abi::AbiVersion;
 use crate::abi::cdylib::context::Context;
-use crate::abi::cdylib::primitive::{Str, Status};
+use crate::abi::cdylib::primitive::{Status, Str};
 use crate::abi::cdylib::value::ValueHandle;
 
 /// The symbol a plugin exports to report the ABI it was built against, as a NUL-terminated name.

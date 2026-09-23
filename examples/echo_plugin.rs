@@ -31,7 +31,7 @@ impl Plugin for Echo {
             if let Some(map) = data.as_map_mut() {
                 map.insert("seen-by", Value::Str(own.name().to_string()));
             }
-            Ok(Flow::Continue)
+            Flow::Continue(Ok(()))
         })?;
         Ok(())
     }

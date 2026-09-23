@@ -15,7 +15,7 @@
 //! there that leads anywhere.
 
 use crate::error::Result;
-use crate::hook::callback::{Flow, Observe, RegistrationId, Transform};
+use crate::hook::callback::{Observe, RegistrationId, Transform};
 use crate::hook::declare::HookRef;
 use crate::registry::{ApiFn, CallbackKind, Registry};
 use crate::value::Value;
@@ -31,7 +31,7 @@ use std::sync::Arc;
 /// The nine methods mirror [`Context`]'s own, because a context is exactly this or the registry.
 pub(crate) trait HostOps: Send + Sync {
     /// Fire `hook` in the host, and take back whatever its callbacks did to the payload.
-    fn run(&self, hook: &str, data: &mut Value) -> Result<Flow>;
+    fn run(&self, hook: &str, data: &mut Value) -> Result<()>;
     /// File a transform callback in the host's registry under `context`'s name.
     fn register_transform(
         &self,
@@ -142,7 +142,11 @@ impl Context {
     /// Each callback is handed **its own** context, so it can fire further hooks, call other
     /// plugins, and register or withdraw whatever it likes while the dispatch is still running.
     /// No lock is held while any of that happens.
-    pub fn run<'a>(&self, hook: impl Into<HookRef<'a>>, data: &mut Value) -> Result<Flow> {
+    ///
+    /// Returns what the callback that ended the dispatch returned — `Ok(())` if none did, or if
+    /// the one that did succeeded. A callback that failed but asked to carry on is logged and does
+    /// not show up here; see [`Flow`](crate::Flow).
+    pub fn run<'a>(&self, hook: impl Into<HookRef<'a>>, data: &mut Value) -> Result<()> {
         let hook = hook.into();
         match self.access {
             HostAccess::Direct(registry) => registry.dispatch(self.access, hook, data),

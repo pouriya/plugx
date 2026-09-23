@@ -1,6 +1,6 @@
 use crate::abi::AbiVersion;
 use crate::abi::cdylib::callback::{ApiFunction, Callback};
-use crate::abi::cdylib::primitive::{Str, Status};
+use crate::abi::cdylib::primitive::{Status, Str};
 use crate::abi::cdylib::value::{ValueApi, ValueHandle};
 use std::ffi::c_void;
 
@@ -52,6 +52,23 @@ pub struct HostApi {
     /// Emit a log line through the host's logger, at a `log`-style level (1 = error … 5 = trace).
     /// A plugin has its own linkage and cannot reach the host's global logger any other way.
     pub log: unsafe extern "C" fn(host_data: *mut c_void, level: u8, message: Str),
+
+    /// From inside a hook callback: record why this callback failed, and let the dispatch carry on
+    /// to the next callback anyway.
+    ///
+    /// Returns [`Status::ContinueError`], which is the code the callback then returns — so the
+    /// whole of it is `return host->continue_with_error(host_data, message);`. The host copies the
+    /// message before this returns and logs it at `warn` against this plugin; it does not reach
+    /// whoever fired the hook.
+    ///
+    /// Calling this anywhere but on the way out of a callback does nothing useful.
+    pub continue_with_error: unsafe extern "C" fn(host_data: *mut c_void, message: Str) -> Status,
+
+    /// From inside a hook callback: record why this callback failed, and end the dispatch.
+    ///
+    /// Returns [`Status::Error`], the code the callback then returns. The message is copied
+    /// immediately and becomes the error whoever fired the hook receives.
+    pub stop_with_error: unsafe extern "C" fn(host_data: *mut c_void, message: Str) -> Status,
 
     /// Borrow the message describing why the last host call from this thread returned
     /// [`Status::Error`]. Valid until the next call from this thread.

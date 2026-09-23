@@ -22,13 +22,21 @@ impl Plugin for Caller {
                 Some(path) => path.clone(),
                 None => Value::Str(String::new()),
             };
-            let reversed = own.plugin_call("echo_plugin::reverse", path)?;
-            let stamped = own.host_call("stamp", Value::map())?;
+            // Echo is a declared dependency, so if it has gone away there is nothing sensible
+            // left to do here: end the dispatch and hand the reason to whoever fired the hook.
+            let reversed = match own.plugin_call("echo_plugin::reverse", path) {
+                Ok(reversed) => reversed,
+                Err(error) => return Flow::Stop(Err(error)),
+            };
+            let stamped = match own.host_call("stamp", Value::map()) {
+                Ok(stamped) => stamped,
+                Err(error) => return Flow::Stop(Err(error)),
+            };
             if let Some(map) = data.as_map_mut() {
                 map.insert("reversed", reversed);
                 map.insert("stamp", stamped);
             }
-            Ok(Flow::Continue)
+            Flow::Continue(Ok(()))
         })?;
 
         // Exported after the callback, so the demo can check `unexport` and `Duplicate` too.

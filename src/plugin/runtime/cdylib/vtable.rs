@@ -11,7 +11,7 @@
 //! - **Borrowed** — produced by `list_get` / `map_get`, pointing into a tree somebody else owns.
 //!   Never freed.
 
-use crate::abi::cdylib::{Str, Status, ValueApi, ValueHandle};
+use crate::abi::cdylib::{Status, Str, ValueApi, ValueHandle};
 use crate::value::{Map, Value};
 
 /// Reborrow a handle as the value it really is.
@@ -180,11 +180,7 @@ unsafe extern "C" fn map_len(handle: *const ValueHandle, out: *mut usize) -> Sta
     }
 }
 
-unsafe extern "C" fn map_key_at(
-    handle: *const ValueHandle,
-    index: usize,
-    out: *mut Str,
-) -> Status {
+unsafe extern "C" fn map_key_at(handle: *const ValueHandle, index: usize, out: *mut Str) -> Status {
     if handle.is_null() || out.is_null() {
         return Status::Error;
     }
@@ -224,11 +220,7 @@ unsafe extern "C" fn map_get(handle: *mut ValueHandle, key: Str) -> *mut ValueHa
     }
 }
 
-unsafe extern "C" fn map_set(
-    handle: *mut ValueHandle,
-    key: Str,
-    item: *mut ValueHandle,
-) -> Status {
+unsafe extern "C" fn map_set(handle: *mut ValueHandle, key: Str, item: *mut ValueHandle) -> Status {
     if handle.is_null() || item.is_null() {
         return Status::Error;
     }
@@ -411,6 +403,14 @@ thread_local! {
     /// Per-thread because the host dispatches on whatever thread the plugin called from, and a
     /// shared slot would let one thread's failure overwrite another's before it was read.
     static LAST_ERROR: RefCell<String> = const { RefCell::new(String::new()) };
+
+    /// What the callback now running on this thread recorded on its way out, through
+    /// [`continue_with_error`] or [`stop_with_error`].
+    ///
+    /// Written from inside the callback and taken by the dispatching side the instant the callback
+    /// returns, on the same thread, with nothing in between — so a nested dispatch started by that
+    /// callback has finished and taken its own message long before this one is read.
+    static CALLBACK_ERROR: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
 fn set_last_error(message: impl std::fmt::Display) {
@@ -420,6 +420,35 @@ fn set_last_error(message: impl std::fmt::Display) {
         use std::fmt::Write;
         let _ = write!(slot, "{message}");
     });
+}
+
+/// Take whatever the callback that just returned recorded, and empty the slot.
+///
+/// Empty when the callback reported a failing status without saying anything, which a C plugin can
+/// do by returning the bare code instead of going through one of the two helpers.
+pub(crate) fn take_callback_error() -> String {
+    CALLBACK_ERROR.with(|slot| std::mem::take(&mut *slot.borrow_mut()))
+}
+
+unsafe extern "C" fn continue_with_error(_host_data: *mut c_void, message: Str) -> Status {
+    // SAFETY: `message` is valid for this call by the ABI contract, and copied before returning.
+    record_callback_error(unsafe { message.to_string_lossless() });
+    Status::ContinueError
+}
+
+unsafe extern "C" fn stop_with_error(_host_data: *mut c_void, message: Str) -> Status {
+    // SAFETY: see `continue_with_error`.
+    record_callback_error(unsafe { message.to_string_lossless() });
+    Status::Error
+}
+
+/// Put a callback's own message where the dispatching side will pick it up.
+fn record_callback_error(message: Option<String>) {
+    let message = match message {
+        Some(message) => message,
+        None => "the plugin's error message was not valid UTF-8".to_string(),
+    };
+    CALLBACK_ERROR.with(|slot| *slot.borrow_mut() = message);
 }
 
 /// Recover the registry a plugin was loaded into.
@@ -598,8 +627,7 @@ unsafe extern "C" fn run(host_data: *mut c_void, hook: Str, data: *mut ValueHand
             hook.as_str().into(),
             as_value_mut(data),
         ) {
-            Ok(crate::Flow::Continue) => Status::Ok,
-            Ok(crate::Flow::Stop) => Status::Stop,
+            Ok(()) => Status::Ok,
             Err(error) => {
                 set_last_error(error);
                 Status::Error
@@ -822,6 +850,8 @@ pub static HOST_API: HostApi = HostApi {
     unregister,
     run,
     log,
+    continue_with_error,
+    stop_with_error,
     last_error,
     export,
     unexport,

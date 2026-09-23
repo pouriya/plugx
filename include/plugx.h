@@ -1,4 +1,4 @@
-/* plugx C ABI, version 2.0.0.
+/* plugx C ABI, version 3.0.0.
  *
  * Everything a plugin written in C needs, and nothing else: there is no plugx library to link
  * against. A plugin is a shared object that defines the six `plugx_*` symbols at the bottom of
@@ -34,7 +34,7 @@ extern "C" {
 
 /* The ABI this header describes. A host loads a plugin only when `major` matches its own and
  * `minor` is no higher. */
-#define PLUGX_ABI_MAJOR 2u
+#define PLUGX_ABI_MAJOR 3u
 #define PLUGX_ABI_MINOR 0u
 #define PLUGX_ABI_PATCH 0u
 
@@ -59,6 +59,7 @@ typedef struct PlugxStr {
 typedef int32_t PlugxStatus;
 #define PLUGX_OK 0
 #define PLUGX_STOP 1
+#define PLUGX_CONTINUE_ERROR 2
 #define PLUGX_ERROR (-1)
 #define PLUGX_UNSUPPORTED (-2)
 #define PLUGX_INCOMPATIBLE (-3)
@@ -130,7 +131,20 @@ typedef struct PlugxValueApi {
 /* ---- what a plugin registers ------------------------------------------------------------- */
 
 /* A hook callback. `data` is borrowed for the call: a transform may rewrite it, an observer must
- * not. Return PLUGX_STOP to end the dispatch. */
+ * not.
+ *
+ * A callback answers two questions at once — where the dispatch goes next, and whether this
+ * callback failed — so there are four things to return:
+ *
+ *   PLUGX_OK                                     carry on to the next callback
+ *   PLUGX_STOP                                   end the dispatch here
+ *   host->continue_with_error(host_data, why)    carry on, having failed
+ *   host->stop_with_error(host_data, why)        end the dispatch, having failed
+ *
+ * The two helpers record the message and hand back the code to return, so the whole of it is
+ * `return host->stop_with_error(host_data, plugx_str("redis is down"));`. Failing without stopping
+ * is logged against your plugin and goes no further; failing and stopping is what whoever fired
+ * the hook receives. */
 typedef PlugxStatus (*PlugxCallbackFn)(void *user_data, PlugxValue *data);
 
 /* An exported function. `args` is borrowed; write an owned handle to `out`. On PLUGX_ERROR you may
@@ -172,6 +186,12 @@ typedef struct PlugxHostApi {
   PlugxStatus (*run)(void *host_data, PlugxStr hook, PlugxValue *data);
 
   void (*log)(void *host_data, uint8_t level, PlugxStr message);
+
+  /* Only from inside a hook callback, only on the way out: record why this callback failed, and
+   * take back the code to return. See PlugxCallbackFn. */
+  PlugxStatus (*continue_with_error)(void *host_data, PlugxStr message);
+  PlugxStatus (*stop_with_error)(void *host_data, PlugxStr message);
+
   PlugxStatus (*last_error)(void *host_data, PlugxStr *out);
 
   PlugxStatus (*export_fn)(void *host_data, PlugxStr owner, PlugxStr name,

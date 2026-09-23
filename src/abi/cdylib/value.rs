@@ -1,4 +1,4 @@
-use crate::abi::cdylib::primitive::{Str, Status};
+use crate::abi::cdylib::primitive::{Status, Str};
 use std::marker::PhantomData;
 use std::marker::PhantomPinned;
 

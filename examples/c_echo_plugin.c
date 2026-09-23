@@ -48,14 +48,14 @@ static PlugxStatus on_request_headers(void *user_data, PlugxValue *data) {
 
   PlugxValue *seen = host->value->new_str(plugx_str("c_echo_plugin"));
   if (seen == NULL) {
-    return PLUGX_ERROR;
+    return host->host->stop_with_error(host->host_data, plugx_str("could not allocate a string"));
   }
   /* `map_set` takes ownership, so `seen` must not be released here. */
   host->value->map_set(data, plugx_str("seen-by-c"), seen);
 
   PlugxValue *args = host->value->new_map();
   if (args == NULL) {
-    return PLUGX_ERROR;
+    return host->host->stop_with_error(host->host_data, plugx_str("could not allocate a map"));
   }
   PlugxValue *stamped = NULL;
   PlugxStatus status = host->host->host_call(host->host_data, plugx_str("stamp"), args, &stamped);
@@ -64,7 +64,9 @@ static PlugxStatus on_request_headers(void *user_data, PlugxValue *data) {
     if (stamped != NULL) {
       host->value->release(stamped);
     }
-    return PLUGX_ERROR;
+    /* The application's own function failed. Say why and end the dispatch, rather than stamping a
+     * half-built payload. */
+    return host->host->stop_with_error(host->host_data, plugx_str("the host's stamp failed"));
   }
   host->value->map_set(data, plugx_str("c-stamp"), stamped);
 

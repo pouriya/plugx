@@ -40,11 +40,11 @@
 //! ```
 //!
 //! ```rust
-//! use plugx::{Flow, Result, Value};
+//! use plugx::{Result, Value};
 //!
 //! plugx::hook!(pub REQUEST_HEADERS = "request.headers");
 //!
-//! fn handle(headers: &mut Value) -> Result<Flow> {
+//! fn handle(headers: &mut Value) -> Result<()> {
 //!     plugx::run(&REQUEST_HEADERS, headers)
 //! }
 //! ```
@@ -87,8 +87,9 @@
 //! # Two kinds of callback
 //!
 //! A [`Transform`] receives `&mut Value` and may rewrite the payload. An [`Observe`] receives
-//! `&Value` and may only react. They share one priority-ordered list per hook, and either can end
-//! a dispatch early by returning [`Flow::Stop`].
+//! `&Value` and may only react. They share one priority-ordered list per hook, and both answer with
+//! a [`Flow`]: whether to run the next callback, and whether this one failed. The two are
+//! independent, so a callback can report a failure and still let the rest of the chain run.
 //!
 //! # What is guaranteed
 //!
