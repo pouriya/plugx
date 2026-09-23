@@ -4,7 +4,7 @@
 //! the result, and drives it through the ordinary host API. Nothing here knows the plugin is not
 //! Rust — which is the point of the test.
 
-#![cfg(feature = "load-cdylib")]
+#![cfg(feature = "runtime-cdylib")]
 
 use plugx::{Context, Error, Host, Map, Value};
 use std::path::{Path, PathBuf};
@@ -65,7 +65,9 @@ fn a_plugin_written_in_c() {
     .expect("host export");
 
     // Named after its file, like any other plugin.
-    host.load(&library).expect("load the C plugin");
+    host.add_plugin_source(&format!("file://{}", library.display()))
+        .expect("add the C plugin");
+    host.load_all().expect("load the C plugin");
     let info = host
         .info("c_echo_plugin")
         .expect("the C plugin reported info");

@@ -37,17 +37,40 @@ fn main() {
         other => panic!("expected HostExists, got {}", other.is_ok()),
     }
 
-    // 3. Scan a directory. Each file goes to the loader that claims its extension, and each
-    //    plugin is named after its file, so a repeat is refused.
-    host.add_dir(&directory);
+    // 3. A source no loader claims is refused up front, before anything is fetched.
+    match host.add_plugin_source("ftp://plugins") {
+        Err(plugx::host::Error::Load { .. }) => println!("unknown scheme refused"),
+        other => panic!("expected an unknown scheme to be refused, got {other:?}"),
+    }
+
+    //    A path that is not there is its own error, and it names the source that was not there.
+    host.add_plugin_source("file:///nonexistent/plugins")
+        .expect("add a missing directory");
+    match host.load_all() {
+        Err(plugx::host::Error::Load { source }) => match *source {
+            plugx::plugin::load::Error::NotFound { source } => {
+                println!("missing source reported: {source}");
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        },
+        other => panic!("expected a missing source to be refused, got {other:?}"),
+    }
+
+    // 4. Fetch a directory. Every file in it goes to the runtime that claims its extension, and
+    //    each plugin is named after its file, so a repeat is refused.
+    host.add_plugin_source(&format!("file://{}", directory.display()))
+        .expect("add the plugin directory");
     host.load_all().expect("load all");
-    match host.load(&echo) {
+    // A source with no `://` is a plain path, which is the same thing said shorter.
+    host.add_plugin_source(&echo.display().to_string())
+        .expect("add one plugin twice");
+    match host.load_all() {
         Err(plugx::host::Error::Duplicate { .. }) => println!("duplicate name refused"),
         other => panic!("expected a duplicate name to be refused, got {other:?}"),
     }
     let _ = &caller;
 
-    // 4. Calling a loaded-but-unstarted plugin is its own error.
+    // 5. Calling a loaded-but-unstarted plugin is its own error.
     match host
         .context()
         .plugin_call("echo_plugin::reverse", Value::Str("x".into()))
@@ -57,11 +80,11 @@ fn main() {
     }
 
     host.start_all(&plugx::Map::new()).expect("start all");
-    for (name, state) in host.plugins() {
+    for (name, state) in host.plugin_list() {
         println!("{name} is {}", state.label());
     }
 
-    // 5. A hook fired by the application, through the free function — no context threaded
+    // 6. A hook fired by the application, through the free function — no context threaded
     //    anywhere. `caller_plugin`'s callback calls `echo_plugin::reverse` and the host's `stamp`
     //    from inside the dispatch.
     let mut request = Value::map();
@@ -79,7 +102,7 @@ fn main() {
         Some("echo_plugin")
     );
 
-    // 6. Direct calls, and the three ways one can miss.
+    // 7. Direct calls, and the three ways one can miss.
     let pong = host
         .context()
         .plugin_call("caller_plugin::ping", Value::map())
@@ -102,7 +125,7 @@ fn main() {
         other => panic!("expected Malformed, got {other:?}"),
     }
 
-    // 7. A plugin's own error crosses as a free-form value.
+    // 8. A plugin's own error crosses as a free-form value.
     match host
         .context()
         .plugin_call("echo_plugin::reverse", Value::Int(7))
@@ -111,7 +134,7 @@ fn main() {
         other => panic!("expected Failed, got {other:?}"),
     }
 
-    // 8. Stop drains hooks and functions together.
+    // 9. Stop drains hooks and functions together.
     host.stop("echo_plugin").expect("stop echo");
     match host
         .context()
@@ -126,7 +149,7 @@ fn main() {
 
     host.stop_all().expect("stop all");
 
-    // 9. With the host gone the slot is free again, and the free function has nothing to fire
+    // 10. With the host gone the slot is free again, and the free function has nothing to fire
     //    into.
     drop(host);
     match plugx::run("request.headers", &mut Value::map()) {
