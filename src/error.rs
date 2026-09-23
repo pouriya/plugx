@@ -41,12 +41,15 @@ pub enum Error {
         /// How many in-flight calls were still outstanding.
         outstanding: u32,
     },
-    /// [`plugx::run`](crate::run) was called with no host alive to dispatch into.
+    /// [`plugx::run`](crate::run) was called before plugx was initialized.
     ///
-    /// Either the application has not built its [`Host`](crate::Host) yet or has already dropped
-    /// it, or the call came from inside a loaded plugin — where there is no registry to find and a
-    /// hook must be fired through the [`Context`](crate::Context) the plugin was handed.
-    NoHost,
+    /// The application's job: a [`Host`](crate::Host) has to exist for a hook to go anywhere. It
+    /// has not been built yet, or it has already been dropped.
+    ///
+    /// It also answers the call that came from inside a loaded plugin, where the registry is a
+    /// private, permanently empty one — hooks are fired there through the
+    /// [`Context`](crate::Context) the plugin was handed.
+    NotInitialized,
     /// A [`plugin_call`](crate::Context::plugin_call) target was not spelled `plugin::function`.
     Malformed {
         /// What was asked for.
@@ -105,10 +108,10 @@ impl Display for Error {
                 formatter,
                 "timed out waiting for {outstanding} in-flight call(s) to finish"
             ),
-            Self::NoHost => write!(
+            Self::NotInitialized => write!(
                 formatter,
-                "no plugx host is running in this program \u{2014} inside a plugin, fire hooks through \
-                 the context instead"
+                "plugx is not initialized in this program \u{2014} inside a plugin, fire hooks \
+                 through the context instead"
             ),
             Self::Malformed { target } => {
                 write!(formatter, "`{target}` is not a `plugin::function` target")

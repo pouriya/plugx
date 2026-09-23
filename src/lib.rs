@@ -26,7 +26,7 @@
 //!
 //! [`run`] is deliberately the only free function. A plugin `.so` links its own copy of this
 //! crate, so the slot inside it is empty and stays empty; a `run` from in there returns
-//! [`Error::NoHost`] rather than vanishing into a private table, and everything else a plugin does
+//! [`Error::NotInitialized`] rather than vanishing into a private table, and everything else a plugin does
 //! goes through the context it was given.
 //!
 //! # If you write a library

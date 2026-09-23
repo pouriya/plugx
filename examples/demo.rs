@@ -153,8 +153,8 @@ fn main() {
     //    into.
     drop(host);
     match plugx::run("request.headers", &mut Value::map()) {
-        Err(Error::NoHost) => println!("no host, no dispatch"),
-        other => panic!("expected NoHost, got {other:?}"),
+        Err(Error::NotInitialized) => println!("uninitialized, no dispatch"),
+        other => panic!("expected NotInitialized, got {other:?}"),
     }
     Host::new().expect("the slot is free again");
     println!("done");

@@ -943,7 +943,7 @@ impl Drained {
 // A plugin `.so` links its own copy of this crate, so it gets its own copy of this slot — and that
 // copy stays empty, because nothing inside a loaded library ever fills it. Code in a plugin is
 // handed a [`Context`] on every call and reaches the host through that. A `run` from inside a
-// plugin therefore does not silently vanish into a private table: it returns [`Error::NoHost`],
+// plugin therefore does not silently vanish into a private table: it returns [`Error::NotInitialized`],
 // which is the difference between this design and the one it replaces.
 //
 // It also means one live `Host` per process. A second one, while the first is alive, is refused.
@@ -972,7 +972,7 @@ pub(crate) fn uninstall(registry: &'static Registry) {
 ///
 /// This is for code linked into the application: a library of yours with extension points in it
 /// fires them this way, without the application having to thread anything through. Inside a
-/// loaded plugin there is no registry to find and this returns [`Error::NoHost`] — plugin code
+/// loaded plugin there is no registry to find and this returns [`Error::NotInitialized`] — plugin code
 /// fires hooks through the [`Context`] it was handed.
 ///
 /// ```rust,ignore
@@ -981,7 +981,7 @@ pub(crate) fn uninstall(registry: &'static Registry) {
 pub fn run<'a>(hook: impl Into<HookRef<'a>>, data: &mut Value) -> Result<Flow> {
     let pointer = REGISTRY.load(Ordering::Acquire);
     if pointer.is_null() {
-        return Err(Error::NoHost);
+        return Err(Error::NotInitialized);
     }
     // SAFETY: the only non-null value this slot ever holds is a `&'static Registry` a host leaked,
     // and leaked memory stays valid even after that host is dropped and the slot cleared.
