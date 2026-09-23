@@ -46,7 +46,7 @@ impl Hook {
     }
 
     /// The hook's name, as it appears in the registry and in logs.
-    pub const fn name(&self) -> &'static str {
+    pub const fn name(&self) -> &str {
         self.name
     }
 

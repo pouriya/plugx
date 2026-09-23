@@ -1,40 +1,82 @@
 //! The handle everything else is reached through.
 //!
-//! A `Context` is 40 bytes: a name and a reach. The name is the identity — what the owner is
-//! called, what logs print, and what everything it registers is tagged with. The reach is where
-//! its tables are: pointed straight at them when the code is linked into the host, or at the
-//! host's function-pointer table when the code is running inside a loaded shared library.
+//! A `Context` is 32 bytes: a name and a [`HostAccess`]. The name is the identity — what the owner
+//! is called, what logs print, and what everything it registers is tagged with. The access is where
+//! its registry is: pointed straight at it when the code is linked into the host, or at a
+//! [`HostOps`] that leads back to them when the code runs outside the host's binary.
 //!
 //! Nobody stores one. It is `Copy`, `'static` and cheap enough to rebuild on the spot — the host
 //! builds one per lifecycle call, and a dispatch builds one per callback out of the entry's owner
-//! and the runner's own reach. A plugin that needs one on a background thread just keeps its copy.
+//! and the runner's own access. A plugin that needs one on a background thread just keeps its copy.
 //!
 //! Code linked into the application can skip all this and use [`run`](crate::run), which reads the
-//! program's tables from the one slot a host fills. That slot is empty inside a loaded library, so
-//! a plugin registers, exports and calls through the context it was handed — the only thing in
+//! program's registry from the one slot a host fills. That slot is empty outside the host's binary,
+//! so a plugin registers, exports and calls through the context it was handed — the only thing in
 //! there that leads anywhere.
 
 use crate::error::Result;
 use crate::hook::callback::{Flow, Observe, RegistrationId, Transform};
 use crate::hook::declare::HookRef;
-use crate::remote::Remote;
-use crate::tables::{ApiFn, CallbackKind, Tables};
+use crate::registry::{ApiFn, CallbackKind, Registry};
 use crate::value::Value;
 use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::sync::Arc;
 
-/// Where a context's tables are.
+/// Everything a [`Context`] can ask of a host that is *not* this program's own [`Registry`].
 ///
-/// This is the whole of what a context knows how to reach, and the two arms are the same thing
-/// twice: `Local` is a pointer to the tables, and `Remote` is that same pointer — as `host_data` —
-/// in the form that fits through `extern "C"`, alongside the vtable that takes it back. Nothing
-/// else carries it, which is why a shared library has no table of its own to register into.
+/// One implementation per plugin kind that runs outside the host binary. A cdylib's implementation
+/// calls the host's `extern "C"` function pointers; a WebAssembly guest's would call its imports.
+/// Nothing in this module knows which — that is the whole point of the trait being here.
+///
+/// The nine methods mirror [`Context`]'s own, because a context is exactly this or the registry.
+pub(crate) trait HostOps: Send + Sync {
+    /// Fire `hook` in the host, and take back whatever its callbacks did to the payload.
+    fn run(&self, hook: &str, data: &mut Value) -> Result<Flow>;
+    /// File a transform callback in the host's registry under `context`'s name.
+    fn register_transform(
+        &self,
+        context: Context,
+        hook: &str,
+        priority: i32,
+        callback: Arc<dyn Transform>,
+    ) -> Result<RegistrationId>;
+    /// File an observe callback in the host's registry under `context`'s name.
+    fn register_observe(
+        &self,
+        context: Context,
+        hook: &str,
+        priority: i32,
+        callback: Arc<dyn Observe>,
+    ) -> Result<RegistrationId>;
+    /// Withdraw one of `owner`'s registrations. Whether it was there.
+    fn unregister(&self, owner: &str, registration: RegistrationId) -> bool;
+    /// Publish a function under `context`'s name.
+    fn export(
+        &self,
+        context: Context,
+        name: &str,
+        function: Arc<dyn ApiFn>,
+    ) -> Result<RegistrationId>;
+    /// Withdraw one of `owner`'s functions. Whether it was there.
+    fn unexport(&self, owner: &str, registration: RegistrationId) -> bool;
+    /// Call `plugin::function` through the host.
+    fn plugin_call(&self, target: &str, args: Value) -> Result<Value>;
+    /// Call one of the application's own functions through the host.
+    fn host_call(&self, name: &str, args: Value) -> Result<Value>;
+}
+
+/// How a context gets at the host's registry.
+///
+/// The two arms are the same thing twice: `Direct` is a pointer to the registry, and `Foreign` is
+/// that same pointer in whatever form the plugin's kind can carry it — for a cdylib, `host_data`
+/// plus the function pointers that take it back. Nothing else carries it, which is why a loaded
+/// plugin has no table of its own to register into.
 #[derive(Clone, Copy)]
-pub(crate) enum Reach {
-    /// The tables themselves, for code linked into the host that owns them.
-    Local(&'static Tables),
-    /// The host's vtable, for code running inside a library the host loaded.
-    Remote(Remote),
+pub(crate) enum HostAccess {
+    /// Straight at the registry, for code compiled into the host binary.
+    Direct(&'static Registry),
+    /// Back through the host, for code running outside its binary.
+    Foreign(&'static dyn HostOps),
 }
 
 /// What a plugin is handed on every lifecycle call, and every callback on every dispatch.
@@ -46,49 +88,49 @@ pub(crate) enum Reach {
 #[derive(Clone, Copy)]
 pub struct Context {
     name: &'static str,
-    reach: Reach,
+    access: HostAccess,
 }
 
 impl Debug for Context {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
-        let reach = match self.reach {
-            Reach::Local(_) => "local",
-            Reach::Remote(_) => "remote",
+        let access = match self.access {
+            HostAccess::Direct(_) => "direct",
+            HostAccess::Foreign(_) => "foreign",
         };
         formatter
             .debug_struct("Context")
             .field("name", &self.name)
-            .field("reach", &reach)
+            .field("access", &access)
             .finish()
     }
 }
 
 impl Context {
-    /// Build a context for code linked into the host that owns `tables`.
-    pub(crate) const fn local(name: &'static str, tables: &'static Tables) -> Self {
+    /// Build a context for code linked into the host that owns `registry`.
+    pub(crate) const fn direct(name: &'static str, registry: &'static Registry) -> Self {
         Self {
             name,
-            reach: Reach::Local(tables),
+            access: HostAccess::Direct(registry),
         }
     }
 
-    /// Build a context for code running inside a library `host` loaded.
-    pub(crate) const fn remote(name: &'static str, remote: Remote) -> Self {
+    /// Build a context for code running outside the host's binary, reaching it through `host`.
+    pub(crate) const fn foreign(name: &'static str, host: &'static dyn HostOps) -> Self {
         Self {
             name,
-            reach: Reach::Remote(remote),
+            access: HostAccess::Foreign(host),
         }
     }
 
-    /// Build a context for `name` over an already-known reach — what a dispatch hands each
+    /// Build a context for `name` over an already-known access — what a dispatch hands each
     /// callback, and what a call hands the callee.
-    pub(crate) const fn new(name: &'static str, reach: Reach) -> Self {
-        Self { name, reach }
+    pub(crate) const fn new(name: &'static str, access: HostAccess) -> Self {
+        Self { name, access }
     }
 
     /// The name the host knows this owner by. Identity, not decoration: registrations, exports and
     /// `plugin::function` addressing all key off it.
-    pub const fn name(&self) -> &'static str {
+    pub const fn name(&self) -> &str {
         self.name
     }
 
@@ -102,9 +144,9 @@ impl Context {
     /// No lock is held while any of that happens.
     pub fn run<'a>(&self, hook: impl Into<HookRef<'a>>, data: &mut Value) -> Result<Flow> {
         let hook = hook.into();
-        match self.reach {
-            Reach::Local(tables) => tables.dispatch(self.reach, hook, data),
-            Reach::Remote(remote) => remote.run(hook.name(), data),
+        match self.access {
+            HostAccess::Direct(registry) => registry.dispatch(self.access, hook, data),
+            HostAccess::Foreign(host) => host.run(hook.name(), data),
         }
     }
 
@@ -121,15 +163,15 @@ impl Context {
     ) -> Result<RegistrationId> {
         let hook = hook.into();
         let callback: Arc<dyn Transform> = Arc::new(callback);
-        match self.reach {
-            Reach::Local(tables) => Ok(tables.register(
+        match self.access {
+            HostAccess::Direct(registry) => Ok(registry.register(
                 self.name,
                 hook.name(),
                 priority,
                 CallbackKind::Transform(callback),
             )),
-            Reach::Remote(remote) => {
-                remote.register_transform(*self, hook.name(), priority, callback)
+            HostAccess::Foreign(host) => {
+                host.register_transform(*self, hook.name(), priority, callback)
             }
         }
     }
@@ -143,24 +185,24 @@ impl Context {
     ) -> Result<RegistrationId> {
         let hook = hook.into();
         let callback: Arc<dyn Observe> = Arc::new(callback);
-        match self.reach {
-            Reach::Local(tables) => Ok(tables.register(
+        match self.access {
+            HostAccess::Direct(registry) => Ok(registry.register(
                 self.name,
                 hook.name(),
                 priority,
                 CallbackKind::Observe(callback),
             )),
-            Reach::Remote(remote) => {
-                remote.register_observe(*self, hook.name(), priority, callback)
+            HostAccess::Foreign(host) => {
+                host.register_observe(*self, hook.name(), priority, callback)
             }
         }
     }
 
     /// Remove one of this owner's hook registrations early. Returns whether it was there.
     pub fn unregister(&self, registration: RegistrationId) -> bool {
-        match self.reach {
-            Reach::Local(tables) => tables.unregister(self.name, registration),
-            Reach::Remote(remote) => remote.unregister(self.name, registration),
+        match self.access {
+            HostAccess::Direct(registry) => registry.unregister(self.name, registration),
+            HostAccess::Foreign(host) => host.unregister(self.name, registration),
         }
     }
 
@@ -171,17 +213,17 @@ impl Context {
     /// first with [`unexport`](Self::unexport).
     pub fn export(&self, name: &str, function: impl ApiFn + 'static) -> Result<RegistrationId> {
         let function: Arc<dyn ApiFn> = Arc::new(function);
-        match self.reach {
-            Reach::Local(tables) => tables.export(self.name, name, function),
-            Reach::Remote(remote) => remote.export(*self, name, function),
+        match self.access {
+            HostAccess::Direct(registry) => registry.export(self.name, name, function),
+            HostAccess::Foreign(host) => host.export(*self, name, function),
         }
     }
 
     /// Withdraw one of this owner's functions. Returns whether it was there.
     pub fn unexport(&self, registration: RegistrationId) -> bool {
-        match self.reach {
-            Reach::Local(tables) => tables.unexport(self.name, registration),
-            Reach::Remote(remote) => remote.unexport(self.name, registration),
+        match self.access {
+            HostAccess::Direct(registry) => registry.unexport(self.name, registration),
+            HostAccess::Foreign(host) => host.unexport(self.name, registration),
         }
     }
 
@@ -194,17 +236,17 @@ impl Context {
     /// A callee is free to fire hooks and call further plugins, including back into this one;
     /// plugx does not detect that cycle, and a plugin author who builds one owns it.
     pub fn plugin_call(&self, target: &str, args: Value) -> Result<Value> {
-        match self.reach {
-            Reach::Local(tables) => tables.plugin_call(self.reach, target, args),
-            Reach::Remote(remote) => remote.plugin_call(target, args),
+        match self.access {
+            HostAccess::Direct(registry) => registry.plugin_call(self.access, target, args),
+            HostAccess::Foreign(host) => host.plugin_call(target, args),
         }
     }
 
     /// Call one of the application's own functions. Flat names, no plugin prefix.
     pub fn host_call(&self, name: &str, args: Value) -> Result<Value> {
-        match self.reach {
-            Reach::Local(tables) => tables.host_call(self.reach, name, args),
-            Reach::Remote(remote) => remote.host_call(name, args),
+        match self.access {
+            HostAccess::Direct(registry) => registry.host_call(self.access, name, args),
+            HostAccess::Foreign(host) => host.host_call(name, args),
         }
     }
 }

@@ -278,37 +278,37 @@ impl From<Map> for Value {
 /// original position.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Map {
-    entries: Vec<(String, Value)>,
+    entry_list: Vec<(String, Value)>,
 }
 
 impl Map {
     /// An empty map.
     pub const fn new() -> Self {
         Self {
-            entries: Vec::new(),
+            entry_list: Vec::new(),
         }
     }
 
     /// An empty map with room for `capacity` entries.
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            entries: Vec::with_capacity(capacity),
+            entry_list: Vec::with_capacity(capacity),
         }
     }
 
     /// How many entries the map holds.
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.entry_list.len()
     }
 
     /// Whether the map holds no entries.
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entry_list.is_empty()
     }
 
     /// The value stored under `key`, if any.
     pub fn get(&self, key: &str) -> Option<&Value> {
-        for (name, value) in &self.entries {
+        for (name, value) in &self.entry_list {
             if name == key {
                 return Some(value);
             }
@@ -318,7 +318,7 @@ impl Map {
 
     /// The value stored under `key`, mutably, if any.
     pub fn get_mut(&mut self, key: &str) -> Option<&mut Value> {
-        for (name, value) in &mut self.entries {
+        for (name, value) in &mut self.entry_list {
             if name == key {
                 return Some(value);
             }
@@ -336,12 +336,12 @@ impl Map {
     /// Replacing keeps the key in its original position; a new key is appended.
     pub fn insert(&mut self, key: impl Into<String>, value: Value) -> Option<Value> {
         let key = key.into();
-        for (name, slot) in &mut self.entries {
+        for (name, slot) in &mut self.entry_list {
             if *name == key {
                 return Some(std::mem::replace(slot, value));
             }
         }
-        self.entries.push((key, value));
+        self.entry_list.push((key, value));
         None
     }
 
@@ -349,9 +349,9 @@ impl Map {
     ///
     /// Later entries shift down, so the order of everything else is preserved.
     pub fn remove(&mut self, key: &str) -> Option<Value> {
-        for (index, (name, _)) in self.entries.iter().enumerate() {
+        for (index, (name, _)) in self.entry_list.iter().enumerate() {
             if name == key {
-                let (_, value) = self.entries.remove(index);
+                let (_, value) = self.entry_list.remove(index);
                 return Some(value);
             }
         }
@@ -363,7 +363,7 @@ impl Map {
     /// This is what the C ABI iterates with, since it cannot hold a Rust iterator across the
     /// boundary.
     pub fn entry_at(&self, index: usize) -> Option<(&str, &Value)> {
-        match self.entries.get(index) {
+        match self.entry_list.get(index) {
             Some((name, value)) => Some((name, value)),
             None => None,
         }
@@ -371,33 +371,33 @@ impl Map {
 
     /// Remove every entry.
     pub fn clear(&mut self) {
-        self.entries.clear();
+        self.entry_list.clear();
     }
 
     /// Iterate the entries in insertion order.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &Value)> {
-        self.entries
+        self.entry_list
             .iter()
             .map(|(name, value)| (name.as_str(), value))
     }
 
     /// Iterate the entries in insertion order, with mutable values.
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (&str, &mut Value)> {
-        self.entries
+        self.entry_list
             .iter_mut()
             .map(|(name, value)| (name.as_str(), value))
     }
 
     /// Iterate the keys in insertion order.
     pub fn keys(&self) -> impl Iterator<Item = &str> {
-        self.entries.iter().map(|(name, _)| name.as_str())
+        self.entry_list.iter().map(|(name, _)| name.as_str())
     }
 }
 
 impl Display for Map {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
         formatter.write_str("{")?;
-        for (index, (name, value)) in self.entries.iter().enumerate() {
+        for (index, (name, value)) in self.entry_list.iter().enumerate() {
             if index > 0 {
                 formatter.write_str(", ")?;
             }
@@ -421,7 +421,7 @@ impl IntoIterator for Map {
     type IntoIter = std::vec::IntoIter<(String, Value)>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.entries.into_iter()
+        self.entry_list.into_iter()
     }
 }
 

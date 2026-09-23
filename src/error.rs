@@ -24,16 +24,17 @@ pub enum Error {
         /// What the callback reported.
         source: Box<dyn StdError + Send + Sync>,
     },
-    /// The host rejected a call forwarded from a loaded plugin.
-    Remote {
+    /// A call across the C boundary failed, in either direction: the host refusing something a
+    /// loaded plugin asked for, or a plugin's callback returning a failure code.
+    Ffi {
         /// The hook that was being dispatched, or the operation that was attempted.
         operation: Box<str>,
-        /// What the host reported, when it said anything.
+        /// What the other side reported, when it said anything.
         message: Box<str>,
     },
     /// A stop gave up waiting for in-flight dispatches.
     ///
-    /// The owner's callbacks and functions are already out of the tables, so it can receive
+    /// The owner's callbacks and functions are already out of the registry, so it can receive
     /// nothing new, but at least one call was still running when the deadline passed. Nothing was
     /// dropped and the plugin was not stopped; retry.
     StopTimeout {
@@ -43,7 +44,7 @@ pub enum Error {
     /// [`plugx::run`](crate::run) was called with no host alive to dispatch into.
     ///
     /// Either the application has not built its [`Host`](crate::Host) yet or has already dropped
-    /// it, or the call came from inside a loaded plugin — where there are no tables to find and a
+    /// it, or the call came from inside a loaded plugin — where there is no registry to find and a
     /// hook must be fired through the [`Context`](crate::Context) the plugin was handed.
     NoHost,
     /// A [`plugin_call`](crate::Context::plugin_call) target was not spelled `plugin::function`.
@@ -90,11 +91,14 @@ impl Display for Error {
             Self::Callback { hook, source } => {
                 write!(formatter, "callback for hook `{hook}` failed: {source}")
             }
-            Self::Remote { operation, message } => {
+            Self::Ffi { operation, message } => {
                 if message.is_empty() {
-                    write!(formatter, "host rejected `{operation}`")
+                    write!(formatter, "`{operation}` failed across the plugin boundary")
                 } else {
-                    write!(formatter, "host rejected `{operation}`: {message}")
+                    write!(
+                        formatter,
+                        "`{operation}` failed across the plugin boundary: {message}"
+                    )
                 }
             }
             Self::StopTimeout { outstanding } => write!(
