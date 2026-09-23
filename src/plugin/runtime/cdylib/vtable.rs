@@ -1,6 +1,6 @@
 //! The host's side of the value and hook vtables.
 //!
-//! A [`ValueHandle`](crate::abi::ValueHandle) here is a `plugx::value::Value`. The host owns every one of them, which is the
+//! A [`ValueHandle`](crate::abi::cdylib::ValueHandle) here is a `plugx::value::Value`. The host owns every one of them, which is the
 //! whole reason a plugin never touches the host's allocator: it asks for a value to be built,
 //! read or changed, and never holds memory it did not allocate itself.
 //!
@@ -11,7 +11,7 @@
 //! - **Borrowed** — produced by `list_get` / `map_get`, pointing into a tree somebody else owns.
 //!   Never freed.
 
-use crate::abi::{Slice, Status, ValueApi, ValueHandle};
+use crate::abi::cdylib::{Slice, Status, ValueApi, ValueHandle};
 use crate::value::{Map, Value};
 
 /// Reborrow a handle as the value it really is.
@@ -120,8 +120,8 @@ unsafe extern "C" fn list_len(handle: *const ValueHandle, out: *mut usize) -> St
     // SAFETY: see `get_bool`.
     unsafe {
         match as_value(handle).as_list() {
-            Some(items) => {
-                *out = items.len();
+            Some(item_list) => {
+                *out = item_list.len();
                 Status::Ok
             }
             None => Status::Error,
@@ -137,7 +137,7 @@ unsafe extern "C" fn list_get(handle: *mut ValueHandle, index: usize) -> *mut Va
     // documented as never released by the receiver.
     unsafe {
         match as_value_mut(handle).as_list_mut() {
-            Some(items) => match items.get_mut(index) {
+            Some(item_list) => match item_list.get_mut(index) {
                 Some(item) => (item as *mut Value).cast::<ValueHandle>(),
                 None => std::ptr::null_mut(),
             },
@@ -155,8 +155,8 @@ unsafe extern "C" fn list_push(handle: *mut ValueHandle, item: *mut ValueHandle)
     unsafe {
         let item = Box::from_raw(item.cast::<Value>());
         match as_value_mut(handle).as_list_mut() {
-            Some(items) => {
-                items.push(*item);
+            Some(item_list) => {
+                item_list.push(*item);
                 Status::Ok
             }
             None => Status::Error,
@@ -171,8 +171,8 @@ unsafe extern "C" fn map_len(handle: *const ValueHandle, out: *mut usize) -> Sta
     // SAFETY: see `get_bool`.
     unsafe {
         match as_value(handle).as_map() {
-            Some(entries) => {
-                *out = entries.len();
+            Some(map) => {
+                *out = map.len();
                 Status::Ok
             }
             None => Status::Error,
@@ -191,7 +191,7 @@ unsafe extern "C" fn map_key_at(
     // SAFETY: see `get_str` — the key slice borrows the host's string for this call only.
     unsafe {
         match as_value(handle).as_map() {
-            Some(entries) => match entries.entry_at(index) {
+            Some(map) => match map.entry_at(index) {
                 Some((key, _)) => {
                     *out = Slice::from_str(key);
                     Status::Ok
@@ -215,7 +215,7 @@ unsafe extern "C" fn map_get(handle: *mut ValueHandle, key: Slice) -> *mut Value
             None => return std::ptr::null_mut(),
         };
         match as_value_mut(handle).as_map_mut() {
-            Some(entries) => match entries.get_mut(&key) {
+            Some(map) => match map.get_mut(&key) {
                 Some(item) => (item as *mut Value).cast::<ValueHandle>(),
                 None => std::ptr::null_mut(),
             },
@@ -240,8 +240,8 @@ unsafe extern "C" fn map_set(
             None => return Status::Error,
         };
         match as_value_mut(handle).as_map_mut() {
-            Some(entries) => {
-                entries.insert(key, *item);
+            Some(map) => {
+                map.insert(key, *item);
                 Status::Ok
             }
             None => Status::Error,
@@ -260,7 +260,7 @@ unsafe extern "C" fn map_remove(handle: *mut ValueHandle, key: Slice) -> Status 
             None => return Status::Error,
         };
         match as_value_mut(handle).as_map_mut() {
-            Some(entries) => match entries.remove(&key) {
+            Some(map) => match map.remove(&key) {
                 Some(_) => Status::Ok,
                 None => Status::Error,
             },
@@ -398,10 +398,10 @@ pub static VALUE_API: ValueApi = ValueApi {
     release,
 };
 
-use crate::abi::{ApiFunction, Callback, HostApi};
-use crate::context::{Context, Reach};
-use crate::load::ffi::{FfiApi, FfiObserve, FfiTransform};
-use crate::tables::Tables;
+use super::wrap::{FfiApi, FfiObserve, FfiTransform};
+use crate::abi::cdylib::{ApiFunction, Callback, HostApi};
+use crate::context::{Context, HostAccess};
+use crate::registry::Registry;
 use std::cell::RefCell;
 use std::ffi::c_void;
 
@@ -422,21 +422,21 @@ fn set_last_error(message: impl std::fmt::Display) {
     });
 }
 
-/// Recover the tables a plugin was loaded into.
+/// Recover the registry a plugin was loaded into.
 ///
-/// This is what `host_data` is for: the loader put a pointer to its host's [`Tables`] there, so a
+/// This is what `host_data` is for: the loader put a pointer to its host's [`Registry`] there, so a
 /// plugin reaches them without the vtable having to hold any state of its own.
 ///
 /// # Safety
 ///
 /// `host_data` must be the pointer this crate's cdylib loader wrote into the plugin's context: a
-/// leaked `Tables` valid for the life of the process.
-unsafe fn tables<'a>(host_data: *mut c_void) -> Option<&'a Tables> {
+/// leaked `Registry` valid for the life of the process.
+unsafe fn registry<'a>(host_data: *mut c_void) -> Option<&'a Registry> {
     if host_data.is_null() {
         return None;
     }
-    // SAFETY: the caller guarantees this is the leaked `Tables` the loader wrote.
-    Some(unsafe { &*host_data.cast::<Tables>() })
+    // SAFETY: the caller guarantees this is the leaked `Registry` the loader wrote.
+    Some(unsafe { &*host_data.cast::<Registry>() })
 }
 
 unsafe extern "C" fn register_transform(
@@ -450,15 +450,15 @@ unsafe extern "C" fn register_transform(
     if out_id.is_null() {
         return Status::Error;
     }
-    // SAFETY: `host_data` is the loader's leaked `Tables`; `owner` and `hook` are valid for this
+    // SAFETY: `host_data` is the loader's leaked `Registry`; `owner` and `hook` are valid for this
     // call by the ABI contract and copied here; `out_id` was checked non-null and is the caller's
     // writable local. Ownership of `callback.user_data` passes to `FfiTransform`, which frees it
-    // through the record's `drop` when the tables drop it.
+    // through the record's `drop` when the registry drop it.
     unsafe {
-        let tables = match tables(host_data) {
-            Some(tables) => tables,
+        let registry = match registry(host_data) {
+            Some(registry) => registry,
             None => {
-                set_last_error("the plugin was given no tables to register into");
+                set_last_error("the plugin was given no registry to register into");
                 return Status::Error;
             }
         };
@@ -469,14 +469,14 @@ unsafe extern "C" fn register_transform(
                 return Status::Error;
             }
         };
-        let owner = match tables.interned(&owner) {
+        let owner = match registry.interned(&owner) {
             Some(owner) => owner,
             None => {
                 set_last_error("no plugin of that name is loaded here");
                 return Status::Error;
             }
         };
-        let id = Context::local(owner, tables).on_transform(
+        let id = Context::direct(owner, registry).on_transform(
             hook.as_str(),
             priority,
             FfiTransform::new(callback),
@@ -507,10 +507,10 @@ unsafe extern "C" fn register_observe(
     }
     // SAFETY: see `register_transform`.
     unsafe {
-        let tables = match tables(host_data) {
-            Some(tables) => tables,
+        let registry = match registry(host_data) {
+            Some(registry) => registry,
             None => {
-                set_last_error("the plugin was given no tables to register into");
+                set_last_error("the plugin was given no registry to register into");
                 return Status::Error;
             }
         };
@@ -521,14 +521,14 @@ unsafe extern "C" fn register_observe(
                 return Status::Error;
             }
         };
-        let owner = match tables.interned(&owner) {
+        let owner = match registry.interned(&owner) {
             Some(owner) => owner,
             None => {
                 set_last_error("no plugin of that name is loaded here");
                 return Status::Error;
             }
         };
-        let id = Context::local(owner, tables).on_observe(
+        let id = Context::direct(owner, registry).on_observe(
             hook.as_str(),
             priority,
             FfiObserve::new(callback),
@@ -547,21 +547,21 @@ unsafe extern "C" fn register_observe(
 }
 
 unsafe extern "C" fn unregister(host_data: *mut c_void, owner: Slice, id: u64) -> Status {
-    // SAFETY: `host_data` is the loader's leaked `Tables`; `owner` is valid for this call.
+    // SAFETY: `host_data` is the loader's leaked `Registry`; `owner` is valid for this call.
     unsafe {
-        let tables = match tables(host_data) {
-            Some(tables) => tables,
+        let registry = match registry(host_data) {
+            Some(registry) => registry,
             None => return Status::Error,
         };
         let owner = match owner.to_string_lossless() {
             Some(owner) => owner,
             None => return Status::Error,
         };
-        let owner = match tables.interned(&owner) {
+        let owner = match registry.interned(&owner) {
             Some(owner) => owner,
             None => return Status::Error,
         };
-        match Context::local(owner, tables).unregister(crate::RegistrationId::new(id)) {
+        match Context::direct(owner, registry).unregister(crate::RegistrationId::new(id)) {
             true => Status::Ok,
             false => {
                 set_last_error("no such registration for this plugin");
@@ -575,14 +575,14 @@ unsafe extern "C" fn run(host_data: *mut c_void, hook: Slice, data: *mut ValueHa
     if data.is_null() {
         return Status::Error;
     }
-    // SAFETY: `host_data` is the loader's leaked `Tables`; `hook` is valid for this call; `data` is
+    // SAFETY: `host_data` is the loader's leaked `Registry`; `hook` is valid for this call; `data` is
     // an owned handle the plugin allocated through `VALUE_API`, so it is a live `Value` and the
     // plugin is not touching it concurrently.
     unsafe {
-        let tables = match tables(host_data) {
-            Some(tables) => tables,
+        let registry = match registry(host_data) {
+            Some(registry) => registry,
             None => {
-                set_last_error("the plugin was given no tables to dispatch into");
+                set_last_error("the plugin was given no registry to dispatch into");
                 return Status::Error;
             }
         };
@@ -593,8 +593,8 @@ unsafe extern "C" fn run(host_data: *mut c_void, hook: Slice, data: *mut ValueHa
                 return Status::Error;
             }
         };
-        match tables.dispatch(
-            Reach::Local(tables),
+        match registry.dispatch(
+            HostAccess::Direct(registry),
             hook.as_str().into(),
             as_value_mut(data),
         ) {
@@ -660,10 +660,10 @@ unsafe extern "C" fn export(
     }
     // SAFETY: as `register_transform` — ownership of `function.user_data` passes to `FfiApi`.
     unsafe {
-        let tables = match tables(host_data) {
-            Some(tables) => tables,
+        let registry = match registry(host_data) {
+            Some(registry) => registry,
             None => {
-                set_last_error("the plugin was given no tables to export into");
+                set_last_error("the plugin was given no registry to export into");
                 return Status::Error;
             }
         };
@@ -674,14 +674,14 @@ unsafe extern "C" fn export(
                 return Status::Error;
             }
         };
-        let owner = match tables.interned(&owner) {
+        let owner = match registry.interned(&owner) {
             Some(owner) => owner,
             None => {
                 set_last_error("no plugin of that name is loaded here");
                 return Status::Error;
             }
         };
-        match Context::local(owner, tables).export(name.as_str(), FfiApi::new(function)) {
+        match Context::direct(owner, registry).export(name.as_str(), FfiApi::new(function)) {
             Ok(id) => {
                 *out_id = id.get();
                 Status::Ok
@@ -697,19 +697,19 @@ unsafe extern "C" fn export(
 unsafe extern "C" fn unexport(host_data: *mut c_void, owner: Slice, id: u64) -> Status {
     // SAFETY: see `unregister`.
     unsafe {
-        let tables = match tables(host_data) {
-            Some(tables) => tables,
+        let registry = match registry(host_data) {
+            Some(registry) => registry,
             None => return Status::Error,
         };
         let owner = match owner.to_string_lossless() {
             Some(owner) => owner,
             None => return Status::Error,
         };
-        let owner = match tables.interned(&owner) {
+        let owner = match registry.interned(&owner) {
             Some(owner) => owner,
             None => return Status::Error,
         };
-        match Context::local(owner, tables).unexport(crate::RegistrationId::new(id)) {
+        match Context::direct(owner, registry).unexport(crate::RegistrationId::new(id)) {
             true => Status::Ok,
             false => {
                 set_last_error("no such export for this plugin");
@@ -728,14 +728,14 @@ unsafe extern "C" fn plugin_call(
     if out.is_null() {
         return Status::Error;
     }
-    // SAFETY: `host_data` is the loader's leaked `Tables`; `target` is valid for this call; `args`
+    // SAFETY: `host_data` is the loader's leaked `Registry`; `target` is valid for this call; `args`
     // is an owned handle the plugin allocated through `VALUE_API`, borrowed and copied here; `out`
     // was checked non-null and receives a handle the host owns until the plugin releases it.
     unsafe {
-        let tables = match tables(host_data) {
-            Some(tables) => tables,
+        let registry = match registry(host_data) {
+            Some(registry) => registry,
             None => {
-                set_last_error("the plugin was given no tables to call into");
+                set_last_error("the plugin was given no registry to call into");
                 return Status::Error;
             }
         };
@@ -750,7 +750,7 @@ unsafe extern "C" fn plugin_call(
             true => Value::map(),
             false => as_value(args).clone(),
         };
-        match tables.plugin_call(Reach::Local(tables), target.as_str(), arguments) {
+        match registry.plugin_call(HostAccess::Direct(registry), target.as_str(), arguments) {
             Ok(value) => {
                 *out = own(value);
                 Status::Ok
@@ -778,10 +778,10 @@ unsafe extern "C" fn host_call(
     }
     // SAFETY: see `plugin_call`.
     unsafe {
-        let tables = match tables(host_data) {
-            Some(tables) => tables,
+        let registry = match registry(host_data) {
+            Some(registry) => registry,
             None => {
-                set_last_error("the plugin was given no tables to call into");
+                set_last_error("the plugin was given no registry to call into");
                 return Status::Error;
             }
         };
@@ -796,7 +796,7 @@ unsafe extern "C" fn host_call(
             true => Value::map(),
             false => as_value(args).clone(),
         };
-        match tables.host_call(Reach::Local(tables), name.as_str(), arguments) {
+        match registry.host_call(HostAccess::Direct(registry), name.as_str(), arguments) {
             Ok(value) => {
                 *out = own(value);
                 Status::Ok

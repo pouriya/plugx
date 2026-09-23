@@ -28,7 +28,7 @@ pub enum Error {
     /// Something reached through the context failed: a registration, a dispatch, an export or
     /// a call into another plugin.
     Hook {
-        /// What the tables reported.
+        /// What the registry reported.
         source: Box<crate::Error>,
     },
 }

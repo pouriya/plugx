@@ -35,22 +35,22 @@ fn to_tanzim(value: &Value) -> TanzimValue {
         },
         Value::Float(inner) => TanzimValue::Float(*inner),
         Value::Str(inner) => TanzimValue::String(inner.clone()),
-        Value::List(items) => {
-            let mut list = Vec::with_capacity(items.len());
-            for item in items {
-                list.push(LocatedValue::new(to_tanzim(item), origin()));
+        Value::List(item_list) => {
+            let mut converted_list = Vec::with_capacity(item_list.len());
+            for item in item_list {
+                converted_list.push(LocatedValue::new(to_tanzim(item), origin()));
             }
-            TanzimValue::List(list)
+            TanzimValue::List(converted_list)
         }
         Value::Map(entries) => {
-            let mut map = TanzimMap::new();
+            let mut converted = TanzimMap::new();
             for (key, item) in entries.iter() {
-                map.insert(
+                converted.insert(
                     key.to_string(),
                     LocatedValue::new(to_tanzim(item), origin()),
                 );
             }
-            TanzimValue::Map(map)
+            TanzimValue::Map(converted)
         }
     }
 }
@@ -68,23 +68,23 @@ fn from_tanzim(value: &TanzimValue) -> Option<Value> {
         },
         TanzimValue::Float(inner) => Some(Value::Float(*inner)),
         TanzimValue::String(inner) => Some(Value::Str(inner.clone())),
-        TanzimValue::List(items) => {
-            let mut list = Vec::with_capacity(items.len());
-            for item in items {
+        TanzimValue::List(item_list) => {
+            let mut converted_list = Vec::with_capacity(item_list.len());
+            for item in item_list {
                 if let Some(item) = from_tanzim(item.value()) {
-                    list.push(item);
+                    converted_list.push(item);
                 }
             }
-            Some(Value::List(list))
+            Some(Value::List(converted_list))
         }
         TanzimValue::Map(entries) => {
-            let mut map = Map::with_capacity(entries.len());
+            let mut converted = Map::with_capacity(entries.len());
             for (key, item) in entries.entries() {
                 if let Some(item) = from_tanzim(item.value()) {
-                    map.insert(key.clone(), item);
+                    converted.insert(key.clone(), item);
                 }
             }
-            Some(Value::Map(map))
+            Some(Value::Map(converted))
         }
         TanzimValue::Null => None,
     }

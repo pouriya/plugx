@@ -26,31 +26,39 @@ tanzim-validate = { version = "0.13.0", optional = true, default-features = fals
 default = []
 plugin = []
 host = ["plugin"]
-sdk = ["plugin"]
-load-cdylib = ["host", "dep:libloading"]
-load-wasm = ["host"]
-load-starlark = ["host"]
-load-js = ["host"]
+
+# Loaders: where a plugin artifact comes from. One per transport.
+load-file = ["host"]
 load-http = ["host"]
+
+# Runtimes: what a loaded artifact is run as. One per plugin kind.
+runtime-cdylib = ["host", "dep:libloading"]
+runtime-wasm = ["host"]
+runtime-starlark = ["host"]
+runtime-js = ["host"]
+
+# The plugin-author side: building a plugin of that kind in Rust.
+compile-cdylib = ["plugin"]
+
 config-tanzim = ["host", "dep:tanzim-validate"]
 testing = []
 logging = ["dep:log"]
 tracing = ["dep:tracing"]
-full = ["host", "sdk", "load-cdylib", "load-wasm", "load-starlark", "load-js", "load-http", "config-tanzim", "testing"]
+full = ["host", "load-file", "load-http", "runtime-cdylib", "runtime-wasm", "runtime-starlark", "runtime-js", "compile-cdylib", "config-tanzim", "testing"]
 
 [[example]]
 name = "echo_plugin"
 crate-type = ["cdylib"]
-required-features = ["sdk"]
+required-features = ["compile-cdylib"]
 
 [[example]]
 name = "caller_plugin"
 crate-type = ["cdylib"]
-required-features = ["sdk"]
+required-features = ["compile-cdylib"]
 
 [[example]]
 name = "demo"
-required-features = ["load-cdylib"]
+required-features = ["runtime-cdylib", "load-file"]
 
 [package.metadata.docs.rs]
 all-features = true

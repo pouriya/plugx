@@ -17,7 +17,7 @@
 //! ```
 //!
 //! By the time [`Plugin::stop`] is called the host has already drained this plugin's callbacks
-//! *and* its exported functions out of the tables and waited for every in-flight dispatch and call
+//! *and* its exported functions out of the registry and waited for every in-flight dispatch and call
 //! to finish, so nothing can still be running against the state being torn down.
 //!
 //! # The context is the plugin's whole world
@@ -31,17 +31,17 @@ pub mod error;
 /// What a plugin reports about itself: [`Info`], [`ConfigSpec`], [`Dependency`], [`Version`].
 pub mod info;
 
+/// Where a plugin comes from: the [`Loader`](load::Loader) contract, and [`Artifact`](load::Artifact).
+#[cfg(feature = "host")]
+pub mod load;
+
+/// What a plugin is run as: the [`Runtime`](runtime::Runtime) contract, and one module per format.
+#[cfg(feature = "host")]
+pub mod runtime;
+
 pub use crate::context::Context;
 pub use error::{Error, Result};
 pub use info::{ConfigSpec, Dependency, Info, Version};
-
-pub use crate::abi::ABI_VERSION;
-
-/// The ABI this build speaks, reported by every plugin so a host can refuse an incompatible one
-/// before calling anything else in its library.
-pub const fn plugx_version() -> crate::abi::AbiVersion {
-    crate::abi::ABI_VERSION
-}
 
 /// A unit of behaviour a host can load, configure, start and stop.
 ///

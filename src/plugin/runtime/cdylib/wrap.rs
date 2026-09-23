@@ -1,17 +1,17 @@
 //! Wrapping a plugin's `repr(C)` callbacks and vtable back into ordinary Rust traits.
 //!
 //! Note what does *not* happen on this side: a payload is already a `plugx::value::Value`, and a
-//! [`ValueHandle`](crate::abi::ValueHandle) is that same value, so handing one to a plugin is a pointer cast. The copying
-//! happens inside the plugin's own trampoline, where it has to.
+//! [`ValueHandle`](crate::abi::cdylib::ValueHandle) is that same value, so handing one to a plugin is a pointer cast. The copying
+//! happens inside the plugin's own `invoke_*` entry point, where it has to.
 
-use crate::abi::{
+use crate::abi::cdylib::{
     ApiFunction, Callback, Context as AbiContext, InfoFn, LastErrorFn, ReloadFn, Slice, StartFn,
     Status, StopFn, ValueHandle,
 };
 use crate::context::Context;
 use crate::hook::{Flow, Observe, Transform};
 use crate::plugin::{Error, Info, Plugin, Result};
-use crate::tables::ApiFn;
+use crate::registry::ApiFn;
 use crate::value::Value;
 
 /// Asks a plugin why its last call failed, when it bothered to say.
@@ -60,13 +60,13 @@ impl Transform for FfiTransform {
         let handle = std::ptr::from_mut(data).cast::<ValueHandle>();
         // SAFETY: `handle` borrows the payload for exactly this call, which is what `CallbackFn`
         // documents. `user_data` is the pointer the plugin registered and has not been dropped:
-        // the tables only drop a callback after draining it and waiting for in-flight dispatches,
+        // the registry only drops a callback after draining it and waiting for in-flight dispatches,
         // so no dispatch can reach a dropped one.
         let status = unsafe { (self.callback.call)(self.callback.user_data, handle) };
         match status {
             Status::Ok => Ok(Flow::Continue),
             Status::Stop => Ok(Flow::Stop),
-            _ => Err(crate::Error::Remote {
+            _ => Err(crate::Error::Ffi {
                 operation: context.name().into(),
                 message: "the plugin's callback failed".into(),
             }),
@@ -109,7 +109,7 @@ impl Observe for FfiObserve {
         match status {
             Status::Ok => Ok(Flow::Continue),
             Status::Stop => Ok(Flow::Stop),
-            _ => Err(crate::Error::Remote {
+            _ => Err(crate::Error::Ffi {
                 operation: context.name().into(),
                 message: "the plugin's callback failed".into(),
             }),
@@ -144,7 +144,7 @@ impl ApiFn for FfiApi {
         let mut out: *mut ValueHandle = std::ptr::null_mut();
         // SAFETY: `arguments` borrows the caller's tree for exactly this call, which is what
         // `ApiCallFn` documents. `user_data` is the pointer the plugin exported and has not been
-        // dropped: the tables only drop a function after draining it and waiting for in-flight
+        // dropped: the registry only drops a function after draining it and waiting for in-flight
         // calls. `out` is a stack local the plugin writes an owned handle into.
         let status = unsafe { (self.function.call)(self.function.user_data, arguments, &mut out) };
         let mut returned = None;
@@ -186,18 +186,27 @@ impl Drop for FfiApi {
 pub struct FfiPlugin {
     symbols: PluginSymbols,
     context: &'static AbiContext,
+    name: &'static str,
 }
 
 impl FfiPlugin {
-    /// Adopt the symbols a loader resolved.
+    /// Adopt the symbols a runtime resolved, under the name it parsed out of the filename.
     ///
     /// # Safety
     ///
     /// `symbols` and `context` must both come from a successful load of a plugin whose ABI was
     /// checked compatible, and must stay valid for the life of the process — which they do,
     /// because plugx never unloads a plugin library.
-    pub const unsafe fn new(symbols: PluginSymbols, context: &'static AbiContext) -> Self {
-        Self { symbols, context }
+    pub const unsafe fn new(
+        symbols: PluginSymbols,
+        context: &'static AbiContext,
+        name: &'static str,
+    ) -> Self {
+        Self {
+            symbols,
+            context,
+            name,
+        }
     }
 }
 
@@ -224,7 +233,13 @@ impl Plugin for FfiPlugin {
         // is a live `Value` and reclaiming the `Box` is the documented transfer of ownership.
         let value = unsafe { *Box::from_raw(handle.cast::<Value>()) };
         match Info::from_value(&value) {
-            Some(info) => Ok(info),
+            // The name is not in the tree and never crosses the ABI: the plugin already has it, in
+            // the `plugin_name` of the context this runtime built for it. Stamped here so a host
+            // can learn it from `info` alone.
+            Some(mut info) => {
+                info.name = self.name;
+                Ok(info)
+            }
             None => Err(Error::plugin("plugin reported malformed info")),
         }
     }

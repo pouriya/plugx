@@ -1,6 +1,6 @@
 //! # Host
 //!
-//! The application side: own the tables, find plugins, load them, order them by what they depend
+//! The application side: own the registry, find plugins, load them, order them by what they depend
 //! on, start them, reconfigure them, and stop them safely.
 //!
 //! ```rust
@@ -15,9 +15,9 @@
 //! # Ok::<(), plugx::host::Error>(())
 //! ```
 //!
-//! # The host owns the tables
+//! # The host owns the registry
 //!
-//! A [`Host`] allocates one set of tables, leaks them, and puts them in this program's one slot.
+//! A [`Host`] allocates one registry, leaks it, and puts it in this program's one slot.
 //! Everything reads them from there: [`plugx::run`](crate::run) for code linked into the
 //! application, and the [`Context`] each plugin is handed for code inside a loaded library.
 //!
@@ -27,7 +27,7 @@
 //! # Stopping is an ordered sequence, and the order is the point
 //!
 //! ```text
-//!   1. retire   — take the plugin's callbacks and exported functions out of the tables
+//!   1. retire   — take the plugin's callbacks and exported functions out of the registry
 //!   2. quiesce  — wait for dispatches and calls that started before step 1 to finish
 //!   3. drop     — free them, while the plugin's code is still mapped
 //!   4. stop     — only now tell the plugin to tear its own state down
@@ -49,15 +49,15 @@ pub mod error;
 
 pub use error::{Error, Result};
 
-pub use crate::tables::State;
+pub use crate::registry::State;
 
 use crate::context::Context;
-use crate::load::{Loader, Request};
+use crate::plugin::load::{Loader, split_scheme};
+use crate::plugin::runtime::Runtime;
 use crate::plugin::{Info, Plugin};
-use crate::tables::{ApiFn, Tables};
+use crate::registry::{ApiFn, Registry};
 use crate::value::Value;
 use cfg_if::cfg_if;
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// How long [`Host::stop`] waits for in-flight dispatches before giving up.
@@ -65,6 +65,9 @@ pub const DEFAULT_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The name the application's own registrations and functions are tagged with.
 const HOST_NAME: &str = "host";
+
+/// The name a plugin is asked for its [`Info`] under, before it has reported one.
+const UNNAMED: &str = "";
 
 /// One plugin the host is looking after.
 struct Managed {
@@ -77,104 +80,219 @@ struct Managed {
 
 /// The application's plugin runtime.
 pub struct Host {
-    loaders: Vec<Box<dyn Loader>>,
-    plugins: Vec<Managed>,
-    directories: Vec<PathBuf>,
-    tables: &'static Tables,
+    loader_list: Vec<Box<dyn Loader>>,
+    runtime_list: Vec<Box<dyn Runtime>>,
+    plugin_list: Vec<Managed>,
+    source_list: Vec<String>,
+    registry: &'static Registry,
     stop_timeout: Duration,
 }
 
 impl Drop for Host {
     /// Gives this program's slot back, so a later host can claim it.
     ///
-    /// The tables themselves stay leaked: a plugin library is never unloaded, and code inside one
+    /// The registry itself stays leaked: a plugin library is never unloaded, and code inside one
     /// may still hold the pointer.
     fn drop(&mut self) {
-        crate::global::uninstall(self.tables);
+        crate::registry::uninstall(self.registry);
     }
 }
 
 impl Host {
-    /// A host with every feature-enabled loader already registered.
+    /// A host with every feature-enabled loader and runtime already registered.
     ///
     /// Claims this program's one slot, and fails with [`Error::HostExists`] if another host is
-    /// still alive. Allocates this host's tables and leaks them: a few hundred bytes, once, for
+    /// still alive. Allocates this host's registry and leaks it: a few hundred bytes, once, for
     /// the life of the process — which is what lets a plugin keep its [`Context`] on a background
     /// thread without any lifetime crossing the ABI.
     pub fn new() -> Result<Self> {
         #[allow(unused_mut)]
         let mut host = Self::empty()?;
-        #[cfg(feature = "load-cdylib")]
+        #[cfg(feature = "load-file")]
         {
-            host = host.with_loader(crate::load::cdylib::Cdylib::new());
+            host = host.with_loader(crate::plugin::load::file::File::new());
+        }
+        #[cfg(feature = "runtime-cdylib")]
+        {
+            host = host.with_runtime(crate::plugin::runtime::cdylib::Cdylib::new());
         }
         Ok(host)
     }
 
-    /// A host with no loaders at all. Add them with [`with_loader`](Self::with_loader).
+    /// A host with no loaders and no runtimes at all. Add them with
+    /// [`with_loader`](Self::with_loader) and [`with_runtime`](Self::with_runtime).
     ///
     /// Claims the slot exactly as [`new`](Self::new) does.
     pub fn empty() -> Result<Self> {
-        let tables: &'static Tables = Box::leak(Box::new(Tables::new()));
-        if !crate::global::install(tables) {
+        let registry: &'static Registry = Box::leak(Box::new(Registry::new()));
+        if !crate::registry::install(registry) {
             return Err(Error::HostExists);
         }
         Ok(Self {
-            loaders: Vec::new(),
-            plugins: Vec::new(),
-            directories: Vec::new(),
-            tables,
+            loader_list: Vec::new(),
+            runtime_list: Vec::new(),
+            plugin_list: Vec::new(),
+            source_list: Vec::new(),
+            registry,
             stop_timeout: DEFAULT_STOP_TIMEOUT,
         })
     }
 
-    /// Add a directory to scan for plugins when [`load_all`](Self::load_all) runs.
-    pub fn add_dir(&mut self, directory: impl AsRef<Path>) {
-        self.directories.push(directory.as_ref().to_path_buf());
+    /// Add somewhere plugins are to be fetched from, as `scheme://rest` or as a plain path.
+    ///
+    /// ```text
+    ///   plugins                    every file in that directory, relative to the process
+    ///   ./build/libauth.so         that one file
+    ///   /opt/plugins               every file in that directory
+    ///   file://plugins             the same thing, said in full
+    ///   https://cdn/plugins.json   whatever an HTTP loader makes of it
+    /// ```
+    ///
+    /// **A source with no `://` is a path**, which is to say a `file` source: that is what anyone
+    /// types first, and there is nothing else it could sensibly mean. A Windows path is one too —
+    /// neither `C:\plugins` nor `C:/plugins` contains `://`.
+    ///
+    /// The scheme is checked here, against the loaders this host has: a source no loader claims is
+    /// [`Error::Load`] now rather than a surprise at [`load_all`](Self::load_all). Nothing is
+    /// fetched yet.
+    pub fn add_plugin_source(&mut self, source: &str) -> Result<()> {
+        let (scheme, _) = split_scheme(source);
+        if self.loader_for(scheme).is_none() {
+            return Err(Error::from(crate::plugin::load::Error::UnknownScheme {
+                source: source.into(),
+            }));
+        }
+        self.source_list.push(source.to_string());
+        Ok(())
     }
 
-    /// Load every plugin in every directory added with [`add_dir`](Self::add_dir).
+    /// Fetch every source added with [`add_plugin_source`](Self::add_plugin_source), and build
+    /// every artifact that comes back.
     ///
-    /// A file goes to the first loader that claims its extension; a file no loader claims is
-    /// skipped in silence, because a plugin directory is allowed to hold other things.
+    /// Each source goes to the loader claiming its scheme, and each artifact it yields goes to the
+    /// first runtime claiming its extension. An artifact no runtime claims is skipped in silence,
+    /// because a place plugins are fetched from is allowed to hold other things.
+    ///
+    /// A plugin's name is its identity, so a second plugin under a name already taken is
+    /// [`Error::Duplicate`]. Note that the artifact has already been built by then — a colliding
+    /// shared library is opened, and stays mapped, because plugx never unloads one.
+    ///
+    /// Loading does not start anything: no callbacks are registered, nothing is exported, and no
+    /// configuration is needed yet.
     pub fn load_all(&mut self) -> Result<()> {
-        let directories = self.directories.clone();
-        for directory in &directories {
-            let entries = match std::fs::read_dir(directory) {
-                Ok(entries) => entries,
-                Err(error) => {
-                    return Err(Error::Directory {
-                        path: directory.display().to_string().into_boxed_str(),
-                        message: error.to_string().into_boxed_str(),
-                    });
-                }
+        let source_list = std::mem::take(&mut self.source_list);
+        for source in &source_list {
+            let (scheme, _) = split_scheme(source);
+            let loader = match self.loader_for(scheme) {
+                Some(loader) => loader,
+                None => continue,
             };
-            let mut paths = Vec::new();
-            for entry in entries {
-                match entry {
-                    Ok(entry) => paths.push(entry.path()),
-                    Err(error) => {
-                        return Err(Error::Directory {
-                            path: directory.display().to_string().into_boxed_str(),
-                            message: error.to_string().into_boxed_str(),
-                        });
-                    }
+
+            cfg_if! {
+                if #[cfg(feature = "tracing")] {
+                    let _span = tracing::debug_span!(
+                        "plugin.fetch",
+                        loader = loader.name(),
+                        source = source.as_str()
+                    )
+                    .entered();
+                } else if #[cfg(feature = "logging")] {
+                    log::debug!(
+                        "msg=\"Fetching plugin source\" loader={} source={source}",
+                        loader.name()
+                    );
                 }
             }
-            paths.sort();
-            for path in &paths {
-                if self.loader_for(path).is_none() {
-                    continue;
+
+            let artifact_list = loader.load(source)?;
+            for artifact in artifact_list {
+                let runtime = match self.runtime_for(&artifact.name) {
+                    Some(runtime) => runtime,
+                    None => continue,
+                };
+                // Copied out because `adopt` needs `&mut self` and these still borrow it.
+                let runtime_name = runtime.name().to_string();
+                let from = artifact.source.clone();
+                let plugin_list = runtime.build(artifact, self.registry)?;
+                for plugin in plugin_list {
+                    self.adopt(plugin, &runtime_name, &from)?;
                 }
-                self.load(path)?;
             }
         }
         Ok(())
     }
 
-    /// Add a loader. They are tried in the order they were added.
+    /// Take a freshly built plugin into this host: ask what it is, and adopt it under the name it
+    /// reports.
+    ///
+    /// The context this is asked through is [`UNNAMED`], because the name is exactly what is being
+    /// asked for. A plugin does not answer out of that context — it answers out of what its
+    /// runtime gave it — so a runtime whose plugins reach the host during `info` must carry their
+    /// own name, as every runtime must anyway to fill [`Info::name`].
+    fn adopt(&mut self, plugin: Box<dyn Plugin>, runtime: &str, from: &str) -> Result<()> {
+        let info = match plugin.info(&Context::direct(UNNAMED, self.registry)) {
+            Ok(info) => info,
+            Err(source) => {
+                return Err(Error::Plugin {
+                    plugin: from.into(),
+                    source: Box::new(source),
+                });
+            }
+        };
+
+        let name = info.name;
+        if name.is_empty() {
+            return Err(Error::from(crate::plugin::runtime::Error::Unnamed {
+                source: from.into(),
+            }));
+        }
+        if self.index_of(name).is_some() {
+            return Err(Error::Duplicate {
+                plugin: name.into(),
+            });
+        }
+
+        // Announced before anything else can reach it, so a plugin that calls back into the host
+        // is already addressable — as `NotStarted`, which is the truth.
+        self.registry.set_state(name, State::Loaded);
+
+        cfg_if! {
+            if #[cfg(feature = "tracing")] {
+                tracing::info!(
+                    msg = "Loaded plugin",
+                    plugin = name,
+                    runtime = runtime,
+                    version = %info.version
+                );
+            } else if #[cfg(feature = "logging")] {
+                log::info!(
+                    "msg=\"Loaded plugin\" plugin={name} runtime={runtime} version={}",
+                    info.version
+                );
+            } else {
+                let _ = runtime;
+            }
+        }
+
+        self.plugin_list.push(Managed {
+            name,
+            plugin,
+            info,
+            config: Value::map(),
+            state: State::Loaded,
+        });
+        Ok(())
+    }
+
+    /// Add a loader: somewhere plugins can be fetched from. Tried in the order they were added.
     pub fn with_loader(mut self, loader: impl Loader + 'static) -> Self {
-        self.loaders.push(Box::new(loader));
+        self.loader_list.push(Box::new(loader));
+        self
+    }
+
+    /// Add a runtime: something artifacts can be run as. Tried in the order they were added.
+    pub fn with_runtime(mut self, runtime: impl Runtime + 'static) -> Self {
+        self.runtime_list.push(Box::new(runtime));
         self
     }
 
@@ -190,7 +308,7 @@ impl Host {
     /// Hand it to anything of yours that fires hooks, and use it to register the application's own
     /// callbacks. Registrations made through it are tagged `host` and are never retired.
     pub const fn context(&self) -> Context {
-        Context::local(HOST_NAME, self.tables)
+        Context::direct(HOST_NAME, self.registry)
     }
 
     /// Publish one of the application's functions, callable by any plugin as
@@ -200,12 +318,13 @@ impl Host {
         name: &str,
         function: impl ApiFn + 'static,
     ) -> crate::Result<crate::RegistrationId> {
-        self.tables.export_host(name, std::sync::Arc::new(function))
+        self.registry
+            .export_host(name, std::sync::Arc::new(function))
     }
 
     /// Every plugin the host knows about, with its state.
-    pub fn plugins(&self) -> impl Iterator<Item = (&'static str, State)> {
-        self.plugins
+    pub fn plugin_list(&self) -> impl Iterator<Item = (&str, State)> {
+        self.plugin_list
             .iter()
             .map(|managed| (managed.name, managed.state))
     }
@@ -217,7 +336,7 @@ impl Host {
     }
 
     fn index_of(&self, name: &str) -> Option<usize> {
-        for (index, managed) in self.plugins.iter().enumerate() {
+        for (index, managed) in self.plugin_list.iter().enumerate() {
             if managed.name == name {
                 return Some(index);
             }
@@ -225,13 +344,28 @@ impl Host {
         None
     }
 
-    /// The first loader that claims this path's extension.
-    fn loader_for(&self, path: &Path) -> Option<&dyn Loader> {
-        let extension = path.extension()?;
-        for loader in &self.loaders {
-            for candidate in loader.extension_list() {
-                if extension.eq_ignore_ascii_case(candidate) {
+    /// The first loader that claims this scheme.
+    fn loader_for(&self, scheme: &str) -> Option<&dyn Loader> {
+        for loader in &self.loader_list {
+            for candidate in loader.schema_list() {
+                if scheme.eq_ignore_ascii_case(candidate) {
                     return Some(loader.as_ref());
+                }
+            }
+        }
+        None
+    }
+
+    /// The first runtime that claims this artifact name's extension.
+    fn runtime_for(&self, name: &str) -> Option<&dyn Runtime> {
+        let extension = match name.rsplit_once('.') {
+            Some((_, extension)) => extension,
+            None => return None,
+        };
+        for runtime in &self.runtime_list {
+            for candidate in runtime.extension_list() {
+                if extension.eq_ignore_ascii_case(candidate) {
+                    return Some(runtime.as_ref());
                 }
             }
         }
@@ -240,7 +374,7 @@ impl Host {
 
     fn find(&self, name: &str) -> Option<&Managed> {
         let index = self.index_of(name)?;
-        Some(&self.plugins[index])
+        Some(&self.plugin_list[index])
     }
 
     fn position(&self, name: &str) -> Result<usize> {
@@ -252,105 +386,13 @@ impl Host {
         }
     }
 
-    /// Load `path` as a plugin, and ask it what it is.
-    ///
-    /// The plugin's name is its filename with any `lib` prefix and extension removed, so
-    /// `plugins/libauth.so` loads as `auth` on every platform. The name is its identity — what its
-    /// registrations are tagged with and how other plugins address its functions — so a second
-    /// plugin under a name already taken is [`Error::Duplicate`]. It is leaked here, once, and
-    /// stays valid for the life of the process.
-    ///
-    /// Loading does not start anything: no callbacks are registered, nothing is exported, and no
-    /// configuration is needed yet.
-    pub fn load(&mut self, path: impl AsRef<Path>) -> Result<()> {
-        let path = path.as_ref();
-        let stem = match path.file_stem() {
-            Some(stem) => stem.to_string_lossy(),
-            None => {
-                return Err(Error::Unnamed {
-                    path: path.display().to_string().into_boxed_str(),
-                });
-            }
-        };
-        let name = match stem.strip_prefix("lib") {
-            Some(rest) => rest,
-            None => stem.as_ref(),
-        };
-        if name.is_empty() {
-            return Err(Error::Unnamed {
-                path: path.display().to_string().into_boxed_str(),
-            });
-        }
-        if self.index_of(name).is_some() {
-            return Err(Error::Duplicate {
-                plugin: name.into(),
-            });
-        }
-
-        let loader = match self.loader_for(path) {
-            Some(loader) => loader,
-            None => {
-                return Err(Error::from(crate::load::Error::Unsupported {
-                    path: path.to_path_buf(),
-                }));
-            }
-        };
-
-        // Leaked once, here. Everything this plugin registers is tagged with this exact `&'static
-        // str`, so identity is a pointer the tables already own rather than a string compared over
-        // and over — and a plugin running inside a shared library can hold on to it for good.
-        let name: &'static str = Box::leak(name.to_string().into_boxed_str());
-        let request = Request::new(name, path, self.tables);
-        let plugin = loader.load(&request)?;
-
-        // Announced before `info`, so a plugin that calls back into the host during its own
-        // inspection is already addressable — as `NotStarted`, which is the truth.
-        self.tables.set_state(name, State::Loaded);
-
-        let info = match plugin.info(&Context::local(name, self.tables)) {
-            Ok(info) => info,
-            Err(source) => {
-                return Err(Error::Plugin {
-                    plugin: name.into(),
-                    source: Box::new(source),
-                });
-            }
-        };
-
-        cfg_if! {
-            if #[cfg(feature = "tracing")] {
-                tracing::info!(
-                    msg = "Loaded plugin",
-                    plugin = name,
-                    loader = loader.name(),
-                    version = %info.version
-                );
-            } else if #[cfg(feature = "logging")] {
-                log::info!(
-                    "msg=\"Loaded plugin\" plugin={name} loader={} version={}",
-                    loader.name(),
-                    info.version
-                );
-            }
-        }
-
-        self.plugins.push(Managed {
-            name,
-            plugin,
-            info,
-            config: Value::map(),
-            state: State::Loaded,
-        });
-        Ok(())
-    }
-
     /// Start one plugin with `config`.
     ///
     /// Its dependencies must already be started. The plugin registers its hook callbacks and
     /// exports its functions during this call, all tagged with its own name.
     pub fn start(&mut self, name: &str, config: Value) -> Result<()> {
         let index = self.position(name)?;
-        if self.plugins[index].state == State::Started {
+        if self.plugin_list[index].state == State::Started {
             return Err(Error::WrongState {
                 plugin: name.into(),
                 state: State::Started.label(),
@@ -360,8 +402,8 @@ impl Host {
         self.check_dependencies(index)?;
         let config = self.validate(index, config)?;
 
-        let tables = self.tables;
-        let managed = &mut self.plugins[index];
+        let registry = self.registry;
+        let managed = &mut self.plugin_list[index];
         cfg_if! {
             if #[cfg(feature = "tracing")] {
                 let _span = tracing::info_span!("plugin.start", plugin = managed.name).entered();
@@ -373,8 +415,8 @@ impl Host {
 
         // Announced before the call, not after: a plugin's `start` may export a function and then
         // fire a hook whose callbacks call it straight back.
-        tables.set_state(managed.name, State::Started);
-        let context = Context::local(managed.name, tables);
+        registry.set_state(managed.name, State::Started);
+        let context = Context::direct(managed.name, registry);
         match managed.plugin.start(&context, &config) {
             Ok(()) => {
                 managed.config = config;
@@ -389,7 +431,7 @@ impl Host {
                 Ok(())
             }
             Err(source) => {
-                tables.set_state(managed.name, State::Loaded);
+                registry.set_state(managed.name, State::Loaded);
                 Err(Error::Plugin {
                     plugin: managed.name.into(),
                     source: Box::new(source),
@@ -405,17 +447,17 @@ impl Host {
     /// `reload` gets stopped and started again instead.
     pub fn reload(&mut self, name: &str, config: Value) -> Result<()> {
         let index = self.position(name)?;
-        if self.plugins[index].state != State::Started {
+        if self.plugin_list[index].state != State::Started {
             return Err(Error::WrongState {
                 plugin: name.into(),
-                state: self.plugins[index].state.label(),
+                state: self.plugin_list[index].state.label(),
                 expected: "started",
             });
         }
         let config = self.validate(index, config)?;
 
-        let tables = self.tables;
-        let managed = &mut self.plugins[index];
+        let registry = self.registry;
+        let managed = &mut self.plugin_list[index];
         cfg_if! {
             if #[cfg(feature = "tracing")] {
                 let _span = tracing::info_span!("plugin.reload", plugin = managed.name).entered();
@@ -426,7 +468,7 @@ impl Host {
         }
 
         let old = managed.config.clone();
-        let context = Context::local(managed.name, tables);
+        let context = Context::direct(managed.name, registry);
         match managed.plugin.reload(&context, &old, &config) {
             Ok(()) => {
                 managed.config = config;
@@ -477,16 +519,16 @@ impl Host {
     /// plugin is then drained but not stopped — harmless where it is, and safe to retry.
     pub fn stop(&mut self, name: &str) -> Result<()> {
         let index = self.position(name)?;
-        if self.plugins[index].state != State::Started {
+        if self.plugin_list[index].state != State::Started {
             return Err(Error::WrongState {
                 plugin: name.into(),
-                state: self.plugins[index].state.label(),
+                state: self.plugin_list[index].state.label(),
                 expected: "started",
             });
         }
-        let tables = self.tables;
+        let registry = self.registry;
         let stop_timeout = self.stop_timeout;
-        let managed = &mut self.plugins[index];
+        let managed = &mut self.plugin_list[index];
 
         cfg_if! {
             if #[cfg(feature = "tracing")] {
@@ -496,11 +538,11 @@ impl Host {
             }
         }
 
-        // 1. Take the callbacks and the exported functions out of the tables. A dispatch or a call
+        // 1. Take the callbacks and the exported functions out of the registry. A dispatch or a call
         //    starting now cannot see them.
-        let retired = tables.retire(managed.name);
-        let callback_count = retired.callbacks();
-        let function_count = retired.functions();
+        let retired = registry.retire(managed.name);
+        let callback_count = retired.callback_count();
+        let function_count = retired.function_count();
 
         // 2 and 3. Wait for dispatches and calls that started *before* step 1, then drop what was
         //    removed — while the plugin's library is still mapped, which it always is.
@@ -510,10 +552,10 @@ impl Host {
                 source: Box::new(source),
             });
         }
-        tables.set_state(managed.name, State::Stopped);
+        registry.set_state(managed.name, State::Stopped);
 
         // 4. Only now can the plugin safely tear down what those callbacks were using.
-        let context = Context::local(managed.name, tables);
+        let context = Context::direct(managed.name, registry);
         match managed.plugin.stop(&context) {
             Ok(()) => {
                 managed.state = State::Stopped;
@@ -552,8 +594,8 @@ impl Host {
     /// `configs` supplies each plugin's configuration by name; a plugin with no entry is started
     /// with an empty map.
     pub fn start_all(&mut self, configs: &crate::value::Map) -> Result<()> {
-        let order = self.start_order()?;
-        for name in order {
+        let order_list = self.start_order()?;
+        for name in order_list {
             let config = match configs.get(name) {
                 Some(config) => config.clone(),
                 None => Value::map(),
@@ -568,10 +610,10 @@ impl Host {
     /// Keeps going after a failure so that one stuck plugin does not strand the rest, and reports
     /// the first error at the end.
     pub fn stop_all(&mut self) -> Result<()> {
-        let mut order = self.start_order()?;
-        order.reverse();
+        let mut order_list = self.start_order()?;
+        order_list.reverse();
         let mut first_error = None;
-        for name in order {
+        for name in order_list {
             let started = match self.find(name) {
                 Some(managed) => managed.state == State::Started,
                 None => false,
@@ -599,19 +641,19 @@ impl Host {
     /// A plain Kahn's algorithm over the declared dependencies. Optional dependencies are ordered
     /// when present and skipped when not.
     pub fn start_order(&self) -> Result<Vec<&'static str>> {
-        let mut remaining: Vec<&Managed> = self.plugins.iter().collect();
-        let mut order: Vec<&'static str> = Vec::with_capacity(remaining.len());
-        while !remaining.is_empty() {
-            let mut ready = Vec::new();
-            for managed in &remaining {
+        let mut remaining_list: Vec<&Managed> = self.plugin_list.iter().collect();
+        let mut order_list: Vec<&'static str> = Vec::with_capacity(remaining_list.len());
+        while !remaining_list.is_empty() {
+            let mut ready_list = Vec::new();
+            for managed in &remaining_list {
                 let mut satisfied = true;
-                for dependency in &managed.info.dependencies {
+                for dependency in &managed.info.dependency_list {
                     let present = self.find(&dependency.name).is_some();
                     if !present {
                         continue;
                     }
                     let mut placed = false;
-                    for name in &order {
+                    for name in &order_list {
                         if *name == dependency.name {
                             placed = true;
                             break;
@@ -623,22 +665,22 @@ impl Host {
                     }
                 }
                 if satisfied {
-                    ready.push(managed.name);
+                    ready_list.push(managed.name);
                 }
             }
-            if ready.is_empty() {
-                let mut stuck = Vec::with_capacity(remaining.len());
-                for managed in &remaining {
-                    stuck.push(Box::from(managed.name));
+            if ready_list.is_empty() {
+                let mut stuck_list = Vec::with_capacity(remaining_list.len());
+                for managed in &remaining_list {
+                    stuck_list.push(Box::from(managed.name));
                 }
                 return Err(Error::Cycle {
-                    plugins: stuck.into_boxed_slice(),
+                    plugin_list: stuck_list.into_boxed_slice(),
                 });
             }
-            remaining.retain(|managed| !ready.contains(&managed.name));
-            order.extend(ready);
+            remaining_list.retain(|managed| !ready_list.contains(&managed.name));
+            order_list.extend(ready_list);
         }
-        Ok(order)
+        Ok(order_list)
     }
 
     /// Check `config` against the plugin's declared spec, coercing it where the spec allows.
@@ -648,7 +690,7 @@ impl Host {
     /// still gets to reject it from `start`.
     #[cfg(feature = "config-tanzim")]
     fn validate(&self, index: usize, config: Value) -> Result<Value> {
-        let managed = &self.plugins[index];
+        let managed = &self.plugin_list[index];
         let schema = match managed.info.config_spec.schema() {
             Some(schema) => schema,
             None => return Ok(config),
@@ -669,8 +711,8 @@ impl Host {
 
     /// Check that every declared dependency is loaded at an acceptable version.
     fn check_dependencies(&self, index: usize) -> Result<()> {
-        let managed = &self.plugins[index];
-        for dependency in &managed.info.dependencies {
+        let managed = &self.plugin_list[index];
+        for dependency in &managed.info.dependency_list {
             let found = self.find(&dependency.name);
             let mut version = None;
             if let Some(other) = found {

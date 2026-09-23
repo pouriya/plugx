@@ -8,7 +8,7 @@
 //!
 //! # Two ways in
 //!
-//! Code linked into the application fires hooks with [`run`], which reads this program's tables
+//! Code linked into the application fires hooks with [`run`], which reads this program's registry
 //! out of the one slot a [`Host`] fills. Code inside a loaded plugin is handed a [`Context`] on
 //! every call and reaches the host through that. Through a context an owner can:
 //!
@@ -20,7 +20,7 @@
 //! - call another plugin's functions — [`plugin_call`](Context::plugin_call)
 //! - call the application's functions — [`host_call`](Context::host_call)
 //!
-//! A `Context` is 40 bytes, `Copy` and `'static`: a name and where its tables are. Nothing stores
+//! A `Context` is 32 bytes, `Copy` and `'static`: a name and where its registry is. Nothing stores
 //! one on a plugin's behalf — it is rebuilt per call — but a plugin that wants to fire a hook from
 //! a background thread can keep its copy.
 //!
@@ -32,7 +32,7 @@
 //! # If you write a library
 //!
 //! Fire a hook wherever somebody might want to change what your library does. This is the default
-//! feature set and pulls in nothing heavier than the tables. Take a `&Context` and fire through it
+//! feature set and pulls in nothing heavier than the registry. Take a `&Context` and fire through it
 //! instead if your library might be compiled into a plugin, where there is no slot to read.
 //!
 //! ```toml
@@ -57,10 +57,10 @@
 //!
 //! # If you write an application
 //!
-//! Take the host and whichever loaders you need.
+//! Take the host, whichever runtimes your plugins are built as, and whichever loaders fetch them.
 //!
 //! ```toml
-//! plugx = { version = "0.1", features = ["load-cdylib"] }
+//! plugx = { version = "0.1", features = ["runtime-cdylib", "load-file"] }
 //! ```
 //!
 //! ```rust,ignore
@@ -75,10 +75,10 @@
 //!
 //! # If you write a plugin
 //!
-//! Take the `sdk` feature, implement [`Plugin`], and build a `cdylib`.
+//! Take the `compile-cdylib` feature, implement [`Plugin`], and build a `cdylib`.
 //!
 //! ```toml
-//! plugx = { version = "0.1", features = ["sdk"] }
+//! plugx = { version = "0.1", features = ["compile-cdylib"] }
 //!
 //! [lib]
 //! crate-type = ["cdylib"]
@@ -108,23 +108,17 @@
 pub mod abi;
 pub mod context;
 pub mod error;
-pub mod global;
 pub mod hook;
-pub mod tables;
+pub mod registry;
 pub mod value;
-
-mod remote;
 
 #[cfg(feature = "plugin")]
 pub mod plugin;
 
 #[cfg(feature = "host")]
-pub mod load;
-
-#[cfg(feature = "host")]
 pub mod host;
 
-#[cfg(feature = "sdk")]
+#[cfg(feature = "compile-cdylib")]
 pub mod sdk;
 
 #[cfg(feature = "testing")]
@@ -132,12 +126,14 @@ pub mod testing;
 
 pub use context::Context;
 pub use error::{Error, Result};
-pub use global::run;
 pub use hook::{Flow, Hook, HookRef, Observe, RegistrationId, Transform};
-pub use tables::{ApiFn, State, Tables};
+pub use registry::{ApiFn, Registry, State, run};
 pub use value::{Kind, Map, Value};
 
-pub use abi::{ABI_VERSION, AbiVersion, Context as AbiContext};
+pub use abi::AbiVersion;
+
+#[cfg(any(feature = "runtime-cdylib", feature = "compile-cdylib"))]
+pub use abi::cdylib::{ABI_VERSION, Context as AbiContext};
 
 #[cfg(feature = "plugin")]
 pub use plugin::{ConfigSpec, Dependency, Info, Plugin, Version};

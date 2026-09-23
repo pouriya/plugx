@@ -24,11 +24,11 @@ impl Version {
 
     /// Parse `"1.2.3"`. Returns `None` on anything else.
     pub fn parse(text: &str) -> Option<Self> {
-        let mut parts = text.split('.');
-        let major = parts.next()?.parse().ok()?;
-        let minor = parts.next()?.parse().ok()?;
-        let patch = parts.next()?.parse().ok()?;
-        if parts.next().is_some() {
+        let mut part_list = text.split('.');
+        let major = part_list.next()?.parse().ok()?;
+        let minor = part_list.next()?.parse().ok()?;
+        let patch = part_list.next()?.parse().ok()?;
+        if part_list.next().is_some() {
             return None;
         }
         Some(Self::new(major, minor, patch))
@@ -119,6 +119,14 @@ impl ConfigSpec {
 /// Everything a plugin reports about itself.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Info {
+    /// The plugin's identity: what its registrations are tagged with and how other plugins address
+    /// its functions.
+    ///
+    /// **Filled in by the runtime**, not by the plugin author. A plugin's name is its filename,
+    /// parsed by the runtime that claimed it, and it is the runtime that leaks it and stamps it
+    /// here — which is how a host learns what to call a plugin it has just built. Whatever a
+    /// plugin writes here is replaced.
+    pub name: &'static str,
     /// The plugin's own version.
     pub version: Version,
     /// One line saying what the plugin does.
@@ -126,17 +134,18 @@ pub struct Info {
     /// The shape of the configuration it expects.
     pub config_spec: ConfigSpec,
     /// The plugins it needs, and in what versions.
-    pub dependencies: Vec<Dependency>,
+    pub dependency_list: Vec<Dependency>,
 }
 
 impl Info {
     /// The minimum: a version and a description, no configuration and no dependencies.
     pub fn new(version: Version, description: impl Into<String>) -> Self {
         Self {
+            name: "",
             version,
             description: description.into(),
             config_spec: ConfigSpec::none(),
-            dependencies: Vec::new(),
+            dependency_list: Vec::new(),
         }
     }
 
@@ -148,7 +157,7 @@ impl Info {
 
     /// Declare a dependency.
     pub fn with_dependency(mut self, dependency: Dependency) -> Self {
-        self.dependencies.push(dependency);
+        self.dependency_list.push(dependency);
         self
     }
 
@@ -160,8 +169,8 @@ impl Info {
         if let Some(schema) = self.config_spec.schema() {
             root.insert("config_spec", schema.clone());
         }
-        let mut dependencies = Vec::with_capacity(self.dependencies.len());
-        for dependency in &self.dependencies {
+        let mut dependency_list = Vec::with_capacity(self.dependency_list.len());
+        for dependency in &self.dependency_list {
             let mut entry = Map::with_capacity(4);
             entry.insert("name", Value::Str(dependency.name.clone()));
             entry.insert("minimum", Value::Str(dependency.minimum.to_string()));
@@ -171,10 +180,10 @@ impl Info {
             if dependency.optional {
                 entry.insert("optional", Value::Bool(true));
             }
-            dependencies.push(Value::Map(entry));
+            dependency_list.push(Value::Map(entry));
         }
-        if !dependencies.is_empty() {
-            root.insert("dependencies", Value::List(dependencies));
+        if !dependency_list.is_empty() {
+            root.insert("dependencies", Value::List(dependency_list));
         }
         Value::Map(root)
     }
@@ -193,9 +202,9 @@ impl Info {
             Some(schema) => ConfigSpec::new(schema.clone()),
             None => ConfigSpec::none(),
         };
-        let mut dependencies = Vec::new();
-        if let Some(Value::List(items)) = root.get("dependencies") {
-            for item in items {
+        let mut dependency_list = Vec::new();
+        if let Some(Value::List(item_list)) = root.get("dependencies") {
+            for item in item_list {
                 let entry = item.as_map()?;
                 let name = entry.get("name")?.as_str()?.to_string();
                 let minimum = Version::parse(entry.get("minimum")?.as_str()?)?;
@@ -207,7 +216,7 @@ impl Info {
                     Some(Value::Bool(flag)) => *flag,
                     _ => false,
                 };
-                dependencies.push(Dependency {
+                dependency_list.push(Dependency {
                     name,
                     minimum,
                     before,
@@ -216,10 +225,11 @@ impl Info {
             }
         }
         Some(Self {
+            name: "",
             version,
             description,
             config_spec,
-            dependencies,
+            dependency_list,
         })
     }
 }

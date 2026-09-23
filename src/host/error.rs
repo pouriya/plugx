@@ -8,10 +8,15 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Why a host operation failed.
 #[derive(Debug)]
 pub enum Error {
-    /// No loader could turn the artifact into a plugin.
+    /// A plugin source could not be fetched.
     Load {
         /// What the loader reported.
-        source: Box<crate::load::Error>,
+        source: Box<crate::plugin::load::Error>,
+    },
+    /// An artifact could not be turned into plugins.
+    Build {
+        /// What the runtime reported.
+        source: Box<crate::plugin::runtime::Error>,
     },
     /// A lifecycle call into the plugin failed.
     Plugin {
@@ -20,14 +25,14 @@ pub enum Error {
         /// What it reported.
         source: Box<crate::plugin::Error>,
     },
-    /// The tables refused to drain the plugin in time.
+    /// The registry refused to drain the plugin in time.
     ///
-    /// Its callbacks and functions are out of the tables, so the plugin can receive nothing new,
+    /// Its callbacks and functions are out of the registry, so the plugin can receive nothing new,
     /// but at least one dispatch or call was still running. The plugin was **not** stopped; retry.
     Drain {
         /// The plugin being stopped.
         plugin: Box<str>,
-        /// What the tables reported.
+        /// What the registry reported.
         source: Box<crate::Error>,
     },
     /// A plugin of that name is already loaded. The name is the identity, so it must be unique.
@@ -61,26 +66,14 @@ pub enum Error {
     /// Dependencies form a cycle, so there is no order that starts everything.
     Cycle {
         /// The plugins caught in it.
-        plugins: Box<[Box<str>]>,
+        plugin_list: Box<[Box<str>]>,
     },
     /// Another host is already running in this process.
     ///
-    /// There is one slot for a program's tables, and one host fills it — that is what lets a
+    /// There is one slot for a program's registry, and one host fills it — that is what lets a
     /// library fire hooks with [`plugx::run`](crate::run) without being handed anything. Drop the
     /// first host to build a second.
     HostExists,
-    /// A path has no filename to take a plugin's name from.
-    Unnamed {
-        /// The path that was offered.
-        path: Box<str>,
-    },
-    /// A directory offered for scanning could not be read.
-    Directory {
-        /// The directory.
-        path: Box<str>,
-        /// What the filesystem reported.
-        message: Box<str>,
-    },
     /// The configuration did not match the plugin's declared spec.
     Config {
         /// The plugin whose config it is.
@@ -94,6 +87,7 @@ impl Display for Error {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
         match self {
             Self::Load { source } => write!(formatter, "{source}"),
+            Self::Build { source } => write!(formatter, "{source}"),
             Self::Plugin { plugin, source } => write!(formatter, "plugin `{plugin}`: {source}"),
             Self::Drain { plugin, source } => {
                 write!(formatter, "stopping plugin `{plugin}`: {source}")
@@ -124,21 +118,15 @@ impl Display for Error {
                     "plugin `{plugin}` needs {needs}, which is not loaded"
                 ),
             },
-            Self::Cycle { plugins } => {
+            Self::Cycle { plugin_list } => {
                 formatter.write_str("dependency cycle between:")?;
-                for plugin in plugins {
+                for plugin in plugin_list {
                     write!(formatter, " `{plugin}`")?;
                 }
                 Ok(())
             }
             Self::HostExists => {
                 formatter.write_str("another plugx host is already running in this process")
-            }
-            Self::Unnamed { path } => {
-                write!(formatter, "`{path}` has no filename to name a plugin after")
-            }
-            Self::Directory { path, message } => {
-                write!(formatter, "could not read `{path}`: {message}")
             }
             Self::Config { plugin, message } => {
                 write!(formatter, "configuration for `{plugin}`: {message}")
@@ -151,6 +139,7 @@ impl StdError for Error {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match self {
             Self::Load { source } => Some(source.as_ref()),
+            Self::Build { source } => Some(source.as_ref()),
             Self::Plugin { source, .. } => Some(source.as_ref()),
             Self::Drain { source, .. } => Some(source.as_ref()),
             _ => None,
@@ -158,9 +147,17 @@ impl StdError for Error {
     }
 }
 
-impl From<crate::load::Error> for Error {
-    fn from(source: crate::load::Error) -> Self {
+impl From<crate::plugin::load::Error> for Error {
+    fn from(source: crate::plugin::load::Error) -> Self {
         Self::Load {
+            source: Box::new(source),
+        }
+    }
+}
+
+impl From<crate::plugin::runtime::Error> for Error {
+    fn from(source: crate::plugin::runtime::Error) -> Self {
+        Self::Build {
             source: Box::new(source),
         }
     }
