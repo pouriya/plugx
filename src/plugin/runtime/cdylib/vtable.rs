@@ -11,7 +11,7 @@
 //! - **Borrowed** — produced by `list_get` / `map_get`, pointing into a tree somebody else owns.
 //!   Never freed.
 
-use crate::abi::cdylib::{Slice, Status, ValueApi, ValueHandle};
+use crate::abi::cdylib::{Str, Status, ValueApi, ValueHandle};
 use crate::value::{Map, Value};
 
 /// Reborrow a handle as the value it really is.
@@ -96,7 +96,7 @@ unsafe extern "C" fn get_float(handle: *const ValueHandle, out: *mut f64) -> Sta
     }
 }
 
-unsafe extern "C" fn get_str(handle: *const ValueHandle, out: *mut Slice) -> Status {
+unsafe extern "C" fn get_str(handle: *const ValueHandle, out: *mut Str) -> Status {
     if handle.is_null() || out.is_null() {
         return Status::Error;
     }
@@ -105,7 +105,7 @@ unsafe extern "C" fn get_str(handle: *const ValueHandle, out: *mut Slice) -> Sta
     unsafe {
         match as_value(handle).as_str() {
             Some(text) => {
-                *out = Slice::from_str(text);
+                *out = Str::from_str(text);
                 Status::Ok
             }
             None => Status::Error,
@@ -183,7 +183,7 @@ unsafe extern "C" fn map_len(handle: *const ValueHandle, out: *mut usize) -> Sta
 unsafe extern "C" fn map_key_at(
     handle: *const ValueHandle,
     index: usize,
-    out: *mut Slice,
+    out: *mut Str,
 ) -> Status {
     if handle.is_null() || out.is_null() {
         return Status::Error;
@@ -193,7 +193,7 @@ unsafe extern "C" fn map_key_at(
         match as_value(handle).as_map() {
             Some(map) => match map.entry_at(index) {
                 Some((key, _)) => {
-                    *out = Slice::from_str(key);
+                    *out = Str::from_str(key);
                     Status::Ok
                 }
                 None => Status::Error,
@@ -203,7 +203,7 @@ unsafe extern "C" fn map_key_at(
     }
 }
 
-unsafe extern "C" fn map_get(handle: *mut ValueHandle, key: Slice) -> *mut ValueHandle {
+unsafe extern "C" fn map_get(handle: *mut ValueHandle, key: Str) -> *mut ValueHandle {
     if handle.is_null() {
         return std::ptr::null_mut();
     }
@@ -226,7 +226,7 @@ unsafe extern "C" fn map_get(handle: *mut ValueHandle, key: Slice) -> *mut Value
 
 unsafe extern "C" fn map_set(
     handle: *mut ValueHandle,
-    key: Slice,
+    key: Str,
     item: *mut ValueHandle,
 ) -> Status {
     if handle.is_null() || item.is_null() {
@@ -249,7 +249,7 @@ unsafe extern "C" fn map_set(
     }
 }
 
-unsafe extern "C" fn map_remove(handle: *mut ValueHandle, key: Slice) -> Status {
+unsafe extern "C" fn map_remove(handle: *mut ValueHandle, key: Str) -> Status {
     if handle.is_null() {
         return Status::Error;
     }
@@ -296,7 +296,7 @@ unsafe extern "C" fn set_float(handle: *mut ValueHandle, item: f64) -> Status {
     Status::Ok
 }
 
-unsafe extern "C" fn set_str(handle: *mut ValueHandle, item: Slice) -> Status {
+unsafe extern "C" fn set_str(handle: *mut ValueHandle, item: Str) -> Status {
     if handle.is_null() {
         return Status::Error;
     }
@@ -342,7 +342,7 @@ unsafe extern "C" fn new_float(item: f64) -> *mut ValueHandle {
     own(Value::Float(item))
 }
 
-unsafe extern "C" fn new_str(item: Slice) -> *mut ValueHandle {
+unsafe extern "C" fn new_str(item: Str) -> *mut ValueHandle {
     // SAFETY: `item` is valid for this call by the ABI contract, and copied before returning.
     match unsafe { item.to_string_lossless() } {
         Some(text) => own(Value::Str(text)),
@@ -441,8 +441,8 @@ unsafe fn registry<'a>(host_data: *mut c_void) -> Option<&'a Registry> {
 
 unsafe extern "C" fn register_transform(
     host_data: *mut c_void,
-    owner: Slice,
-    hook: Slice,
+    owner: Str,
+    hook: Str,
     priority: i32,
     callback: Callback,
     out_id: *mut u64,
@@ -496,8 +496,8 @@ unsafe extern "C" fn register_transform(
 
 unsafe extern "C" fn register_observe(
     host_data: *mut c_void,
-    owner: Slice,
-    hook: Slice,
+    owner: Str,
+    hook: Str,
     priority: i32,
     callback: Callback,
     out_id: *mut u64,
@@ -546,7 +546,7 @@ unsafe extern "C" fn register_observe(
     }
 }
 
-unsafe extern "C" fn unregister(host_data: *mut c_void, owner: Slice, id: u64) -> Status {
+unsafe extern "C" fn unregister(host_data: *mut c_void, owner: Str, id: u64) -> Status {
     // SAFETY: `host_data` is the loader's leaked `Registry`; `owner` is valid for this call.
     unsafe {
         let registry = match registry(host_data) {
@@ -571,7 +571,7 @@ unsafe extern "C" fn unregister(host_data: *mut c_void, owner: Slice, id: u64) -
     }
 }
 
-unsafe extern "C" fn run(host_data: *mut c_void, hook: Slice, data: *mut ValueHandle) -> Status {
+unsafe extern "C" fn run(host_data: *mut c_void, hook: Str, data: *mut ValueHandle) -> Status {
     if data.is_null() {
         return Status::Error;
     }
@@ -608,7 +608,7 @@ unsafe extern "C" fn run(host_data: *mut c_void, hook: Slice, data: *mut ValueHa
     }
 }
 
-unsafe extern "C" fn log(_host_data: *mut c_void, level: u8, message: Slice) {
+unsafe extern "C" fn log(_host_data: *mut c_void, level: u8, message: Str) {
     // SAFETY: `message` is valid for this call by the ABI contract, and copied before returning.
     let text = match unsafe { message.to_string_lossless() } {
         Some(text) => text,
@@ -635,7 +635,7 @@ unsafe extern "C" fn log(_host_data: *mut c_void, level: u8, message: Slice) {
     }
 }
 
-unsafe extern "C" fn last_error(_host_data: *mut c_void, out: *mut Slice) -> Status {
+unsafe extern "C" fn last_error(_host_data: *mut c_void, out: *mut Str) -> Status {
     if out.is_null() {
         return Status::Error;
     }
@@ -643,15 +643,15 @@ unsafe extern "C" fn last_error(_host_data: *mut c_void, out: *mut Slice) -> Sta
         let slot = slot.borrow();
         // SAFETY: `out` was checked non-null. The slice borrows this thread's error buffer, which
         // the ABI documents as valid only until this thread's next host call.
-        unsafe { *out = Slice::from_str(&slot) };
+        unsafe { *out = Str::from_str(&slot) };
     });
     Status::Ok
 }
 
 unsafe extern "C" fn export(
     host_data: *mut c_void,
-    owner: Slice,
-    name: Slice,
+    owner: Str,
+    name: Str,
     function: ApiFunction,
     out_id: *mut u64,
 ) -> Status {
@@ -694,7 +694,7 @@ unsafe extern "C" fn export(
     }
 }
 
-unsafe extern "C" fn unexport(host_data: *mut c_void, owner: Slice, id: u64) -> Status {
+unsafe extern "C" fn unexport(host_data: *mut c_void, owner: Str, id: u64) -> Status {
     // SAFETY: see `unregister`.
     unsafe {
         let registry = match registry(host_data) {
@@ -721,7 +721,7 @@ unsafe extern "C" fn unexport(host_data: *mut c_void, owner: Slice, id: u64) -> 
 
 unsafe extern "C" fn plugin_call(
     host_data: *mut c_void,
-    target: Slice,
+    target: Str,
     args: *const ValueHandle,
     out: *mut *mut ValueHandle,
 ) -> Status {
@@ -769,7 +769,7 @@ unsafe extern "C" fn plugin_call(
 
 unsafe extern "C" fn host_call(
     host_data: *mut c_void,
-    name: Slice,
+    name: Str,
     args: *const ValueHandle,
     out: *mut *mut ValueHandle,
 ) -> Status {

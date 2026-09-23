@@ -71,7 +71,7 @@ process.
   plugin that already tore down its state.
 - **Never `dlclose`.** A stopped plugin's library stays mapped for the life of the process. Code
   reload dlopens a fresh copy at a versioned path. Leaking is always safe; unloading is not.
-- **Nothing Rust-owned crosses the ABI.** Only `Slice` (ptr + len, which the receiver copies
+- **Nothing Rust-owned crosses the ABI.** Only `Str` (ptr + len, which the receiver copies
   immediately) and opaque handles freed by whoever created them. A plugin cdylib has its own
   allocator; a `String` allocated on one side and freed on the other is undefined behaviour.
 - **Never resolve symbols back into the host.** No `-rdynamic`, no `RTLD_GLOBAL`. Everything a

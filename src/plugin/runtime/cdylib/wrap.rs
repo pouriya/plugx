@@ -5,7 +5,7 @@
 //! happens inside the plugin's own `invoke_*` entry point, where it has to.
 
 use crate::abi::cdylib::{
-    ApiFunction, Callback, Context as AbiContext, InfoFn, LastErrorFn, ReloadFn, Slice, StartFn,
+    ApiFunction, Callback, Context as AbiContext, InfoFn, LastErrorFn, ReloadFn, Str, StartFn,
     Status, StopFn, ValueHandle,
 };
 use crate::context::Context;
@@ -16,7 +16,7 @@ use crate::value::Value;
 
 /// Asks a plugin why its last call failed, when it bothered to say.
 fn plugin_message(symbols: &PluginSymbols) -> String {
-    let mut slice = Slice::EMPTY;
+    let mut slice = Str::EMPTY;
     // SAFETY: the symbols were resolved from a library that stays mapped for the life of the
     // process, and `slice` is a stack local. The borrow is copied out before this returns, which
     // is the lifetime the ABI gives it.

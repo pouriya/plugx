@@ -8,7 +8,7 @@
  *
  *   - Every vtable starts with `size`, naming its own byte length. Check it before reading a field
  *     an older host may not have written. Fields are only ever appended.
- *   - Nothing owned by one side is freed by the other. Strings cross as `PlugxSlice`, which the
+ *   - Nothing owned by one side is freed by the other. Strings cross as `PlugxStr`, which the
  *     receiver copies immediately; value trees cross as opaque handles, built and released through
  *     the host's `PlugxValueApi`.
  *   - Never resolve symbols back into the host. Everything reachable arrives as function pointers
@@ -44,11 +44,16 @@ typedef struct PlugxAbiVersion {
   uint32_t patch;
 } PlugxAbiVersion;
 
-/* A borrowed run of bytes, almost always UTF-8, valid only for the call it was passed to. */
-typedef struct PlugxSlice {
+/* A borrowed string: a pointer and a length, with no NUL terminator, valid only for the call it was
+ * passed to. Copy it if you need it afterwards.
+ *
+ * Pointer plus length rather than `const char *`, because the other side's strings are not
+ * NUL-terminated and may contain an interior NUL. UTF-8 is expected but not enforced: the host
+ * checks the bytes it receives and refuses the call if they are not. */
+typedef struct PlugxStr {
   const uint8_t *ptr;
   size_t len;
-} PlugxSlice;
+} PlugxStr;
 
 /* The result of a call across the boundary. Anything negative is a failure. */
 typedef int32_t PlugxStatus;
@@ -93,29 +98,29 @@ typedef struct PlugxValueApi {
   PlugxStatus (*get_bool)(const PlugxValue *value, bool *out);
   PlugxStatus (*get_int)(const PlugxValue *value, int64_t *out);
   PlugxStatus (*get_float)(const PlugxValue *value, double *out);
-  PlugxStatus (*get_str)(const PlugxValue *value, PlugxSlice *out);
+  PlugxStatus (*get_str)(const PlugxValue *value, PlugxStr *out);
 
   PlugxStatus (*list_len)(const PlugxValue *value, size_t *out);
   PlugxValue *(*list_get)(PlugxValue *value, size_t index);
   PlugxStatus (*list_push)(PlugxValue *value, PlugxValue *item);
 
   PlugxStatus (*map_len)(const PlugxValue *value, size_t *out);
-  PlugxStatus (*map_key_at)(const PlugxValue *value, size_t index, PlugxSlice *out);
-  PlugxValue *(*map_get)(PlugxValue *value, PlugxSlice key);
-  PlugxStatus (*map_set)(PlugxValue *value, PlugxSlice key, PlugxValue *item);
-  PlugxStatus (*map_remove)(PlugxValue *value, PlugxSlice key);
+  PlugxStatus (*map_key_at)(const PlugxValue *value, size_t index, PlugxStr *out);
+  PlugxValue *(*map_get)(PlugxValue *value, PlugxStr key);
+  PlugxStatus (*map_set)(PlugxValue *value, PlugxStr key, PlugxValue *item);
+  PlugxStatus (*map_remove)(PlugxValue *value, PlugxStr key);
 
   PlugxStatus (*set_bool)(PlugxValue *value, bool item);
   PlugxStatus (*set_int)(PlugxValue *value, int64_t item);
   PlugxStatus (*set_float)(PlugxValue *value, double item);
-  PlugxStatus (*set_str)(PlugxValue *value, PlugxSlice item);
+  PlugxStatus (*set_str)(PlugxValue *value, PlugxStr item);
   PlugxStatus (*set_list)(PlugxValue *value);
   PlugxStatus (*set_map)(PlugxValue *value);
 
   PlugxValue *(*new_bool)(bool item);
   PlugxValue *(*new_int)(int64_t item);
   PlugxValue *(*new_float)(double item);
-  PlugxValue *(*new_str)(PlugxSlice item);
+  PlugxValue *(*new_str)(PlugxStr item);
   PlugxValue *(*new_list)(void);
   PlugxValue *(*new_map)(void);
 
@@ -158,24 +163,24 @@ typedef struct PlugxHostApi {
 
   const PlugxValueApi *value;
 
-  PlugxStatus (*register_transform)(void *host_data, PlugxSlice owner, PlugxSlice hook,
+  PlugxStatus (*register_transform)(void *host_data, PlugxStr owner, PlugxStr hook,
                                     int32_t priority, PlugxCallback callback, uint64_t *out_id);
-  PlugxStatus (*register_observe)(void *host_data, PlugxSlice owner, PlugxSlice hook,
+  PlugxStatus (*register_observe)(void *host_data, PlugxStr owner, PlugxStr hook,
                                   int32_t priority, PlugxCallback callback, uint64_t *out_id);
-  PlugxStatus (*unregister)(void *host_data, PlugxSlice owner, uint64_t id);
+  PlugxStatus (*unregister)(void *host_data, PlugxStr owner, uint64_t id);
 
-  PlugxStatus (*run)(void *host_data, PlugxSlice hook, PlugxValue *data);
+  PlugxStatus (*run)(void *host_data, PlugxStr hook, PlugxValue *data);
 
-  void (*log)(void *host_data, uint8_t level, PlugxSlice message);
-  PlugxStatus (*last_error)(void *host_data, PlugxSlice *out);
+  void (*log)(void *host_data, uint8_t level, PlugxStr message);
+  PlugxStatus (*last_error)(void *host_data, PlugxStr *out);
 
-  PlugxStatus (*export_fn)(void *host_data, PlugxSlice owner, PlugxSlice name,
+  PlugxStatus (*export_fn)(void *host_data, PlugxStr owner, PlugxStr name,
                            PlugxApiFunction function, uint64_t *out_id);
-  PlugxStatus (*unexport)(void *host_data, PlugxSlice owner, uint64_t id);
+  PlugxStatus (*unexport)(void *host_data, PlugxStr owner, uint64_t id);
 
-  PlugxStatus (*plugin_call)(void *host_data, PlugxSlice target, const PlugxValue *args,
+  PlugxStatus (*plugin_call)(void *host_data, PlugxStr target, const PlugxValue *args,
                              PlugxValue **out);
-  PlugxStatus (*host_call)(void *host_data, PlugxSlice name, const PlugxValue *args,
+  PlugxStatus (*host_call)(void *host_data, PlugxStr name, const PlugxValue *args,
                            PlugxValue **out);
 } PlugxHostApi;
 
@@ -186,7 +191,7 @@ typedef struct PlugxContext {
   PlugxAbiVersion abi;
   const PlugxHostApi *host;
   void *host_data;
-  PlugxSlice plugin_name;
+  PlugxStr plugin_name;
 } PlugxContext;
 
 /* ---- what a plugin must export ------------------------------------------------------------ */
@@ -210,17 +215,17 @@ PlugxStatus plugx_reload(const PlugxContext *context, const PlugxValue *old_conf
 PlugxStatus plugx_stop(const PlugxContext *context);
 
 /* Why the last call into this plugin failed. The slice must stay valid until the next call. */
-PlugxStatus plugx_last_error(PlugxSlice *out);
+PlugxStatus plugx_last_error(PlugxStr *out);
 
-/* Borrow a C string literal as a slice. */
-static inline PlugxSlice plugx_str(const char *text) {
-  PlugxSlice slice;
-  slice.ptr = (const uint8_t *)text;
-  slice.len = 0;
-  while (text[slice.len] != '\0') {
-    slice.len++;
+/* Borrow a NUL-terminated C string as a PlugxStr. The terminator is not included. */
+static inline PlugxStr plugx_str(const char *text) {
+  PlugxStr borrowed;
+  borrowed.ptr = (const uint8_t *)text;
+  borrowed.len = 0;
+  while (text[borrowed.len] != '\0') {
+    borrowed.len++;
   }
-  return slice;
+  return borrowed;
 }
 
 #ifdef __cplusplus

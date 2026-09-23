@@ -1,6 +1,6 @@
 use crate::abi::AbiVersion;
 use crate::abi::cdylib::callback::{ApiFunction, Callback};
-use crate::abi::cdylib::primitive::{Slice, Status};
+use crate::abi::cdylib::primitive::{Str, Status};
 use crate::abi::cdylib::value::{ValueApi, ValueHandle};
 use std::ffi::c_void;
 
@@ -25,8 +25,8 @@ pub struct HostApi {
     /// Register a callback that may mutate the payload. Writes the new registration id to `out_id`.
     pub register_transform: unsafe extern "C" fn(
         host_data: *mut c_void,
-        owner: Slice,
-        hook: Slice,
+        owner: Str,
+        hook: Str,
         priority: i32,
         callback: Callback,
         out_id: *mut u64,
@@ -35,46 +35,46 @@ pub struct HostApi {
     /// Register a callback that may only read the payload. Writes the new id to `out_id`.
     pub register_observe: unsafe extern "C" fn(
         host_data: *mut c_void,
-        owner: Slice,
-        hook: Slice,
+        owner: Str,
+        hook: Str,
         priority: i32,
         callback: Callback,
         out_id: *mut u64,
     ) -> Status,
 
     /// Remove one of this plugin's own registrations. A plugin may not unregister another's.
-    pub unregister: unsafe extern "C" fn(host_data: *mut c_void, owner: Slice, id: u64) -> Status,
+    pub unregister: unsafe extern "C" fn(host_data: *mut c_void, owner: Str, id: u64) -> Status,
 
     /// Fire a hook. This is what a plugin's `Context::run` reaches.
     pub run:
-        unsafe extern "C" fn(host_data: *mut c_void, hook: Slice, data: *mut ValueHandle) -> Status,
+        unsafe extern "C" fn(host_data: *mut c_void, hook: Str, data: *mut ValueHandle) -> Status,
 
     /// Emit a log line through the host's logger, at a `log`-style level (1 = error … 5 = trace).
     /// A plugin has its own linkage and cannot reach the host's global logger any other way.
-    pub log: unsafe extern "C" fn(host_data: *mut c_void, level: u8, message: Slice),
+    pub log: unsafe extern "C" fn(host_data: *mut c_void, level: u8, message: Str),
 
     /// Borrow the message describing why the last host call from this thread returned
     /// [`Status::Error`]. Valid until the next call from this thread.
-    pub last_error: unsafe extern "C" fn(host_data: *mut c_void, out: *mut Slice) -> Status,
+    pub last_error: unsafe extern "C" fn(host_data: *mut c_void, out: *mut Str) -> Status,
 
     /// Publish a function under this plugin's name. Writes the new registration id to `out_id`.
     pub export: unsafe extern "C" fn(
         host_data: *mut c_void,
-        owner: Slice,
-        name: Slice,
+        owner: Str,
+        name: Str,
         function: ApiFunction,
         out_id: *mut u64,
     ) -> Status,
 
     /// Withdraw one of this plugin's own functions.
-    pub unexport: unsafe extern "C" fn(host_data: *mut c_void, owner: Slice, id: u64) -> Status,
+    pub unexport: unsafe extern "C" fn(host_data: *mut c_void, owner: Str, id: u64) -> Status,
 
     /// Call `plugin::function`. On success `out` receives an owned handle; on [`Status::Error`] it
     /// receives the callee's free-form error value, or stays null when the framework itself
     /// refused the call.
     pub plugin_call: unsafe extern "C" fn(
         host_data: *mut c_void,
-        target: Slice,
+        target: Str,
         args: *const ValueHandle,
         out: *mut *mut ValueHandle,
     ) -> Status,
@@ -83,7 +83,7 @@ pub struct HostApi {
     /// [`plugin_call`](Self::plugin_call).
     pub host_call: unsafe extern "C" fn(
         host_data: *mut c_void,
-        name: Slice,
+        name: Str,
         args: *const ValueHandle,
         out: *mut *mut ValueHandle,
     ) -> Status,
@@ -120,5 +120,5 @@ pub struct Context {
     /// The name the host knows this plugin by. It is the plugin's identity: everything it
     /// registers is tagged with it, and other plugins address its functions through it. Valid for
     /// the life of the process.
-    pub plugin_name: Slice,
+    pub plugin_name: Str,
 }

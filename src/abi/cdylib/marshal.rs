@@ -1,4 +1,4 @@
-use crate::abi::cdylib::primitive::{Slice, Status};
+use crate::abi::cdylib::primitive::{Str, Status};
 use crate::abi::cdylib::value::{ValueApi, ValueHandle};
 use crate::value::{Kind, Map, Value};
 
@@ -18,7 +18,7 @@ pub unsafe fn to_handle(api: &ValueApi, value: &Value) -> *mut ValueHandle {
             Value::Bool(inner) => (api.new_bool)(*inner),
             Value::Int(inner) => (api.new_int)(*inner),
             Value::Float(inner) => (api.new_float)(*inner),
-            Value::Str(inner) => (api.new_str)(Slice::from_str(inner)),
+            Value::Str(inner) => (api.new_str)(Str::from_str(inner)),
             Value::List(item_list) => {
                 let handle = (api.new_list)();
                 if handle.is_null() {
@@ -50,7 +50,7 @@ pub unsafe fn to_handle(api: &ValueApi, value: &Value) -> *mut ValueHandle {
                         return std::ptr::null_mut();
                     }
                     // `map_set` takes ownership of `child`.
-                    if (api.map_set)(handle, Slice::from_str(key), child) != Status::Ok {
+                    if (api.map_set)(handle, Str::from_str(key), child) != Status::Ok {
                         (api.release)(handle);
                         return std::ptr::null_mut();
                     }
@@ -101,7 +101,7 @@ pub unsafe fn from_handle(api: &ValueApi, handle: *const ValueHandle) -> Option<
                 }
             }
             Kind::Str => {
-                let mut out = Slice::EMPTY;
+                let mut out = Str::EMPTY;
                 match (api.get_str)(handle, &mut out) {
                     Status::Ok => {
                         let text = out.to_string_lossless()?;
@@ -132,7 +132,7 @@ pub unsafe fn from_handle(api: &ValueApi, handle: *const ValueHandle) -> Option<
                 }
                 let mut map = Map::with_capacity(len);
                 for index in 0..len {
-                    let mut key = Slice::EMPTY;
+                    let mut key = Str::EMPTY;
                     if (api.map_key_at)(handle, index, &mut key) != Status::Ok {
                         return None;
                     }
@@ -172,7 +172,7 @@ pub unsafe fn write_back(api: &ValueApi, handle: *mut ValueHandle, value: &Value
             Value::Bool(inner) => (api.set_bool)(handle, *inner),
             Value::Int(inner) => (api.set_int)(handle, *inner),
             Value::Float(inner) => (api.set_float)(handle, *inner),
-            Value::Str(inner) => (api.set_str)(handle, Slice::from_str(inner)),
+            Value::Str(inner) => (api.set_str)(handle, Str::from_str(inner)),
             Value::List(item_list) => {
                 let status = (api.set_list)(handle);
                 if status != Status::Ok {
@@ -200,7 +200,7 @@ pub unsafe fn write_back(api: &ValueApi, handle: *mut ValueHandle, value: &Value
                     if child.is_null() {
                         return Status::Error;
                     }
-                    let status = (api.map_set)(handle, Slice::from_str(key), child);
+                    let status = (api.map_set)(handle, Str::from_str(key), child);
                     if status != Status::Ok {
                         return status;
                     }

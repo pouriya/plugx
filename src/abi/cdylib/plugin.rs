@@ -1,6 +1,6 @@
 use crate::abi::AbiVersion;
 use crate::abi::cdylib::context::Context;
-use crate::abi::cdylib::primitive::{Slice, Status};
+use crate::abi::cdylib::primitive::{Str, Status};
 use crate::abi::cdylib::value::ValueHandle;
 
 /// The symbol a plugin exports to report the ABI it was built against, as a NUL-terminated name.
@@ -65,4 +65,4 @@ pub type StopFn = unsafe extern "C" fn(context: *const Context) -> Status;
 ///
 /// Borrows the message describing why the last call into this plugin, on this thread, returned
 /// [`Status::Error`]. Valid until the next call into the plugin.
-pub type LastErrorFn = unsafe extern "C" fn(out: *mut Slice) -> Status;
+pub type LastErrorFn = unsafe extern "C" fn(out: *mut Str) -> Status;

@@ -1,4 +1,4 @@
-use crate::abi::cdylib::primitive::{Slice, Status};
+use crate::abi::cdylib::primitive::{Str, Status};
 use std::marker::PhantomData;
 use std::marker::PhantomPinned;
 
@@ -39,7 +39,7 @@ pub struct ValueApi {
     /// Read a float. [`Status::Error`] if the value is another kind.
     pub get_float: unsafe extern "C" fn(value: *const ValueHandle, out: *mut f64) -> Status,
     /// Borrow a string's bytes, valid until the current call returns.
-    pub get_str: unsafe extern "C" fn(value: *const ValueHandle, out: *mut Slice) -> Status,
+    pub get_str: unsafe extern "C" fn(value: *const ValueHandle, out: *mut Str) -> Status,
 
     /// Number of items in a list.
     pub list_len: unsafe extern "C" fn(value: *const ValueHandle, out: *mut usize) -> Status,
@@ -52,14 +52,14 @@ pub struct ValueApi {
     pub map_len: unsafe extern "C" fn(value: *const ValueHandle, out: *mut usize) -> Status,
     /// Borrow the key at `index` in insertion order, valid until the current call returns.
     pub map_key_at:
-        unsafe extern "C" fn(value: *const ValueHandle, index: usize, out: *mut Slice) -> Status,
+        unsafe extern "C" fn(value: *const ValueHandle, index: usize, out: *mut Str) -> Status,
     /// Borrow the value stored under `key`, or null if absent. Never released by the caller.
-    pub map_get: unsafe extern "C" fn(value: *mut ValueHandle, key: Slice) -> *mut ValueHandle,
+    pub map_get: unsafe extern "C" fn(value: *mut ValueHandle, key: Str) -> *mut ValueHandle,
     /// Store `item` under `key`, taking ownership of it and replacing anything already there.
     pub map_set:
-        unsafe extern "C" fn(value: *mut ValueHandle, key: Slice, item: *mut ValueHandle) -> Status,
+        unsafe extern "C" fn(value: *mut ValueHandle, key: Str, item: *mut ValueHandle) -> Status,
     /// Remove `key`. [`Status::Error`] if it was not present.
-    pub map_remove: unsafe extern "C" fn(value: *mut ValueHandle, key: Slice) -> Status,
+    pub map_remove: unsafe extern "C" fn(value: *mut ValueHandle, key: Str) -> Status,
 
     /// Replace the value in place with a boolean, changing its kind.
     pub set_bool: unsafe extern "C" fn(value: *mut ValueHandle, item: bool) -> Status,
@@ -68,7 +68,7 @@ pub struct ValueApi {
     /// Replace the value in place with a float, changing its kind.
     pub set_float: unsafe extern "C" fn(value: *mut ValueHandle, item: f64) -> Status,
     /// Replace the value in place with a copy of `item`, changing its kind.
-    pub set_str: unsafe extern "C" fn(value: *mut ValueHandle, item: Slice) -> Status,
+    pub set_str: unsafe extern "C" fn(value: *mut ValueHandle, item: Str) -> Status,
     /// Replace the value in place with an empty list, changing its kind.
     pub set_list: unsafe extern "C" fn(value: *mut ValueHandle) -> Status,
     /// Replace the value in place with an empty map, changing its kind.
@@ -81,7 +81,7 @@ pub struct ValueApi {
     /// Allocate a new float. Owned by the caller.
     pub new_float: unsafe extern "C" fn(item: f64) -> *mut ValueHandle,
     /// Allocate a new string, copying `item`. Owned by the caller.
-    pub new_str: unsafe extern "C" fn(item: Slice) -> *mut ValueHandle,
+    pub new_str: unsafe extern "C" fn(item: Str) -> *mut ValueHandle,
     /// Allocate a new empty list. Owned by the caller.
     pub new_list: unsafe extern "C" fn() -> *mut ValueHandle,
     /// Allocate a new empty map. Owned by the caller.

@@ -13,7 +13,7 @@
 //! never has to invalidate them.
 
 use crate::abi::cdylib::{
-    ApiFunction, Callback, HostApi, Slice, Status, ValueApi, ValueHandle, marshal,
+    ApiFunction, Callback, HostApi, Str, Status, ValueApi, ValueHandle, marshal,
 };
 use crate::context::{Context, HostOps};
 use crate::error::{Error, Result};
@@ -63,7 +63,7 @@ impl HostRef {
 
     /// The host's description of why its last call from this thread failed.
     fn last_error(&self) -> Box<str> {
-        let mut slice = Slice::EMPTY;
+        let mut slice = Str::EMPTY;
         // SAFETY: module contract. `slice` is a stack local, read only after the host reports
         // success; the borrow is copied out before this returns.
         unsafe {
@@ -85,7 +85,7 @@ impl HostRef {
         callee: &str,
         entry: unsafe extern "C" fn(
             *mut c_void,
-            Slice,
+            Str,
             *const ValueHandle,
             *mut *mut ValueHandle,
         ) -> Status,
@@ -103,7 +103,7 @@ impl HostRef {
                 });
             }
             let mut out: *mut ValueHandle = std::ptr::null_mut();
-            let status = entry(self.data, Slice::from_str(target), arguments, &mut out);
+            let status = entry(self.data, Str::from_str(target), arguments, &mut out);
             (api.release)(arguments);
 
             let returned = match out.is_null() {
@@ -153,7 +153,7 @@ impl HostOps for HostRef {
                     message: "the host would not allocate the payload".into(),
                 });
             }
-            let status = (self.api().run)(self.data, Slice::from_str(hook), handle);
+            let status = (self.api().run)(self.data, Str::from_str(hook), handle);
             let updated = marshal::from_handle(api, handle);
             (api.release)(handle);
 
@@ -199,8 +199,8 @@ impl HostOps for HostRef {
         let status = unsafe {
             (self.api().register_transform)(
                 self.data,
-                Slice::from_str(context.name()),
-                Slice::from_str(hook),
+                Str::from_str(context.name()),
+                Str::from_str(hook),
                 priority,
                 record,
                 &mut id,
@@ -237,8 +237,8 @@ impl HostOps for HostRef {
         let status = unsafe {
             (self.api().register_observe)(
                 self.data,
-                Slice::from_str(context.name()),
-                Slice::from_str(hook),
+                Str::from_str(context.name()),
+                Str::from_str(hook),
                 priority,
                 record,
                 &mut id,
@@ -254,10 +254,10 @@ impl HostOps for HostRef {
     }
 
     fn unregister(&self, owner: &str, registration: RegistrationId) -> bool {
-        // SAFETY: module contract. `owner` is borrowed for this call only, which is what `Slice`
+        // SAFETY: module contract. `owner` is borrowed for this call only, which is what `Str`
         // documents.
         let status = unsafe {
-            (self.api().unregister)(self.data, Slice::from_str(owner), registration.get())
+            (self.api().unregister)(self.data, Str::from_str(owner), registration.get())
         };
         status == Status::Ok
     }
@@ -284,8 +284,8 @@ impl HostOps for HostRef {
         let status = unsafe {
             (self.api().export)(
                 self.data,
-                Slice::from_str(context.name()),
-                Slice::from_str(name),
+                Str::from_str(context.name()),
+                Str::from_str(name),
                 record,
                 &mut id,
             )
@@ -302,7 +302,7 @@ impl HostOps for HostRef {
     fn unexport(&self, owner: &str, registration: RegistrationId) -> bool {
         // SAFETY: module contract.
         let status =
-            unsafe { (self.api().unexport)(self.data, Slice::from_str(owner), registration.get()) };
+            unsafe { (self.api().unexport)(self.data, Str::from_str(owner), registration.get()) };
         status == Status::Ok
     }
 

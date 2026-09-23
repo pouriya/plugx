@@ -9,7 +9,7 @@
 //! `HostApi`, `host_data` and `plugin_name` outlive the process. A host guarantees that by never
 //! unloading a plugin library.
 
-use crate::abi::cdylib::{ABI_VERSION, Context, Slice, Status, ValueApi, ValueHandle, marshal};
+use crate::abi::cdylib::{ABI_VERSION, Context, Str, Status, ValueApi, ValueHandle, marshal};
 use crate::context::Context as PluginContext;
 use crate::plugin::{Info, Plugin};
 use crate::value::Value;
@@ -263,8 +263,8 @@ pub unsafe fn stop(context: *const Context, plugin: fn() -> &'static dyn Plugin)
 ///
 /// # Safety
 ///
-/// `out` must be a writable location for one [`Slice`].
-pub unsafe fn last_error(out: *mut Slice) -> Status {
+/// `out` must be a writable location for one [`Str`].
+pub unsafe fn last_error(out: *mut Str) -> Status {
     if out.is_null() {
         return Status::Error;
     }
@@ -272,7 +272,7 @@ pub unsafe fn last_error(out: *mut Slice) -> Status {
         let slot = slot.borrow();
         // SAFETY: `out` was checked non-null. The slice borrows this thread's error buffer, which
         // the ABI documents as valid only until the next call into this plugin.
-        unsafe { *out = Slice::from_str(&slot) };
+        unsafe { *out = Str::from_str(&slot) };
     });
     Status::Ok
 }

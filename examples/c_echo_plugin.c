@@ -22,7 +22,7 @@ typedef struct HostRef {
   const PlugxHostApi *host;
   void *host_data;
   const PlugxValueApi *value;
-  PlugxSlice name;
+  PlugxStr name;
 } HostRef;
 
 static HostRef HOST;
@@ -78,7 +78,7 @@ static PlugxStatus on_request_headers(void *user_data, PlugxValue *data) {
 static PlugxStatus shout(void *user_data, const PlugxValue *args, PlugxValue **out) {
   HostRef *host = (HostRef *)user_data;
 
-  PlugxSlice text;
+  PlugxStr text;
   if (host->value->kind(args) != PLUGX_KIND_STR ||
       host->value->get_str(args, &text) != PLUGX_OK) {
     /* A plugin's own failure crosses as a free-form value, written to `out`. */
@@ -93,7 +93,7 @@ static PlugxStatus shout(void *user_data, const PlugxValue *args, PlugxValue **o
   }
   buffer[len] = '\0';
 
-  PlugxSlice shouted;
+  PlugxStr shouted;
   shouted.ptr = (const uint8_t *)buffer;
   shouted.len = len;
   *out = host->value->new_str(shouted);
@@ -203,7 +203,7 @@ PlugxStatus plugx_stop(const PlugxContext *context) {
   return PLUGX_OK;
 }
 
-PlugxStatus plugx_last_error(PlugxSlice *out) {
+PlugxStatus plugx_last_error(PlugxStr *out) {
   if (out == NULL) {
     return PLUGX_ERROR;
   }

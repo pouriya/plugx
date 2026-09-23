@@ -122,7 +122,7 @@ macro_rules! export_plugin {
         /// `out` must be a writable location for one slice.
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn plugx_last_error(
-            out: *mut $crate::abi::cdylib::Slice,
+            out: *mut $crate::abi::cdylib::Str,
         ) -> $crate::abi::cdylib::Status {
             // SAFETY: forwarded straight from the host, under the same contract this function
             // documents.

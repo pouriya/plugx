@@ -10,28 +10,36 @@ pub const ABI_VERSION: AbiVersion = AbiVersion {
     patch: 0,
 };
 
-/// A borrowed run of bytes, almost always UTF-8.
+/// A borrowed string: a pointer and a length, with no NUL terminator.
 ///
-/// A `Slice` is only valid for the duration of the call it was passed to. **The receiver copies it
+/// This is how every piece of text crosses the boundary — a hook name, a map key, a log line, an
+/// error message. Pointer plus length rather than a C string, because a Rust `str` is not
+/// NUL-terminated and may legally contain an interior NUL: terminating one would mean allocating a
+/// copy on every crossing, and trusting one coming back would mean an unbounded read.
+///
+/// **UTF-8 is expected but not enforced.** The bytes are whatever the other side wrote; every
+/// conversion here checks them and reports `None` rather than assuming.
+///
+/// A `Str` is only valid for the duration of the call it was passed to. **The receiver copies it
 /// immediately** — retaining the pointer past the call is a use-after-free, because the memory
 /// belongs to the other side of the boundary.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct Slice {
-    /// Start of the run. May be null only when `len` is zero.
+pub struct Str {
+    /// Start of the bytes. May be null only when `len` is zero.
     pub ptr: *const u8,
-    /// Length in bytes.
+    /// Length in bytes, not counting any terminator — there is none.
     pub len: usize,
 }
 
-impl Slice {
-    /// The empty slice.
+impl Str {
+    /// The empty string.
     pub const EMPTY: Self = Self {
         ptr: std::ptr::null(),
         len: 0,
     };
 
-    /// Borrow `source` as a slice, valid for as long as `source` is.
+    /// Borrow `source`, valid for as long as `source` is.
     pub const fn from_str(source: &str) -> Self {
         Self {
             ptr: source.as_ptr(),
@@ -41,9 +49,9 @@ impl Slice {
 
     /// Borrow the bytes as a `&'static str`, or `None` if they are not UTF-8.
     ///
-    /// Copies nothing. Only sound for a slice the other side documents as living for the whole
-    /// process — [`plugin_name`](crate::abi::cdylib::Context::plugin_name) is the one such slice in this
-    /// ABI, because the host leaks the name it loaded a plugin under.
+    /// Copies nothing. Only sound for a `Str` the other side documents as living for the whole
+    /// process — [`plugin_name`](crate::abi::cdylib::Context::plugin_name) is the one such `Str` in
+    /// this ABI, because the host leaks the name it loaded a plugin under.
     ///
     /// # Safety
     ///
