@@ -38,8 +38,8 @@
 //! # What `export_plugin!` does for you
 //!
 //! It exports one symbol per lifecycle operation — `plugx_abi_version`, `plugx_info`,
-//! `plugx_start`, `plugx_reload`, `plugx_stop`, `plugx_last_error` — and keeps your plugin value
-//! in a `static` in your own library. There is no entry point, nothing is installed, and nothing
+//! `plugx_start`, `plugx_reload`, `plugx_stop` — and keeps your plugin value in a `static` in your
+//! own library. There is no entry point, nothing is installed, and nothing
 //! is stored on your behalf.
 //!
 //! Each symbol is handed the host's context and turns it into the [`Context`](crate::Context) your

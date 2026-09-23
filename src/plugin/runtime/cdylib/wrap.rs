@@ -5,8 +5,8 @@
 //! happens inside the plugin's own `invoke_*` entry point, where it has to.
 
 use crate::abi::cdylib::{
-    ApiFunction, Callback, Context as AbiContext, InfoFn, LastErrorFn, ReloadFn, StartFn, Status,
-    StopFn, Str, ValueHandle,
+    ApiFunction, Callback, Context as AbiContext, InfoFn, ReloadFn, StartFn, Status, StopFn, Str,
+    ValueHandle,
 };
 use crate::context::Context;
 use crate::hook::{Flow, Observe, Transform};
@@ -37,18 +37,14 @@ fn callback_error(context: &Context) -> crate::Error {
     }
 }
 
-/// Asks a plugin why its last call failed, when it bothered to say.
-fn plugin_message(symbols: &PluginSymbols) -> String {
-    let mut slice = Str::EMPTY;
-    // SAFETY: the symbols were resolved from a library that stays mapped for the life of the
-    // process, and `slice` is a stack local. The borrow is copied out before this returns, which
-    // is the lifetime the ABI gives it.
-    unsafe {
-        if (symbols.last_error)(&mut slice) != Status::Ok {
-            return String::new();
-        }
-        slice.to_string_lossless().unwrap_or_default()
-    }
+/// Copy out whatever a plugin wrote into the `error_out` it was just handed.
+///
+/// Empty when it wrote nothing, or wrote something that was not UTF-8 — either way there is
+/// nothing to report but the failure itself.
+fn plugin_message(error: Str) -> String {
+    // SAFETY: the ABI documents an `error_out` as valid until the next call into the plugin, and
+    // this runs immediately after the call that wrote it, on the same thread.
+    unsafe { error.to_string_lossless() }.unwrap_or_default()
 }
 
 /// The lifecycle symbols a loader resolved out of a plugin's library.
@@ -62,8 +58,6 @@ pub struct PluginSymbols {
     pub reload: ReloadFn,
     /// `plugx_stop`.
     pub stop: StopFn,
-    /// `plugx_last_error`.
-    pub last_error: LastErrorFn,
 }
 
 /// A plugin's transform callback, as the registry sees it.
@@ -229,11 +223,12 @@ unsafe impl Sync for FfiPlugin {}
 impl Plugin for FfiPlugin {
     fn info(&self, _context: &Context) -> Result<Info> {
         let mut handle: *mut ValueHandle = std::ptr::null_mut();
-        // SAFETY: the symbols are live for the process; `handle` is a stack local the plugin
-        // writes an owned handle into, which is released below on every path.
-        let status = unsafe { (self.symbols.info)(self.context, &mut handle) };
+        let mut error = Str::EMPTY;
+        // SAFETY: the symbols are live for the process; `handle` and `error` are stack locals the
+        // plugin writes into, and the handle is released below on every path.
+        let status = unsafe { (self.symbols.info)(self.context, &mut handle, &mut error) };
         if status != Status::Ok {
-            return Err(Error::plugin(plugin_message(&self.symbols)));
+            return Err(Error::plugin(plugin_message(error)));
         }
         if handle.is_null() {
             return Err(Error::plugin("plugin reported no info"));
@@ -255,37 +250,40 @@ impl Plugin for FfiPlugin {
 
     fn start(&self, _context: &Context, config: &Value) -> Result<()> {
         let handle = std::ptr::from_ref(config).cast::<ValueHandle>();
+        let mut error = Str::EMPTY;
         // SAFETY: the symbols are live; `handle` borrows the configuration for this call only,
-        // which is what the ABI documents.
-        let status = unsafe { (self.symbols.start)(self.context, handle) };
+        // which is what the ABI documents, and `error` is a stack local.
+        let status = unsafe { (self.symbols.start)(self.context, handle, &mut error) };
         match status {
             Status::Ok => Ok(()),
             Status::Unsupported => Err(Error::Unsupported { operation: "start" }),
-            _ => Err(Error::plugin(plugin_message(&self.symbols))),
+            _ => Err(Error::plugin(plugin_message(error))),
         }
     }
 
     fn reload(&self, _context: &Context, old_config: &Value, new_config: &Value) -> Result<()> {
         let old = std::ptr::from_ref(old_config).cast::<ValueHandle>();
         let new = std::ptr::from_ref(new_config).cast::<ValueHandle>();
+        let mut error = Str::EMPTY;
         // SAFETY: see `start` — both handles borrow for this call only.
-        let status = unsafe { (self.symbols.reload)(self.context, old, new) };
+        let status = unsafe { (self.symbols.reload)(self.context, old, new, &mut error) };
         match status {
             Status::Ok => Ok(()),
             Status::Unsupported => Err(Error::Unsupported {
                 operation: "reload",
             }),
-            _ => Err(Error::plugin(plugin_message(&self.symbols))),
+            _ => Err(Error::plugin(plugin_message(error))),
         }
     }
 
     fn stop(&self, _context: &Context) -> Result<()> {
+        let mut error = Str::EMPTY;
         // SAFETY: the symbols are live. The host has already drained and quiesced this plugin's
         // callbacks, so nothing can be running inside it while this executes.
-        let status = unsafe { (self.symbols.stop)(self.context) };
+        let status = unsafe { (self.symbols.stop)(self.context, &mut error) };
         match status {
             Status::Ok => Ok(()),
-            _ => Err(Error::plugin(plugin_message(&self.symbols))),
+            _ => Err(Error::plugin(plugin_message(error))),
         }
     }
 }

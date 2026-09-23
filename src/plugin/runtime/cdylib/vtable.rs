@@ -398,11 +398,13 @@ use std::cell::RefCell;
 use std::ffi::c_void;
 
 thread_local! {
-    /// The message behind the last [`Status::Error`] this thread returned to a plugin.
+    /// Where the host parks the message it is handing back through an `error_out`.
     ///
-    /// Per-thread because the host dispatches on whatever thread the plugin called from, and a
-    /// shared slot would let one thread's failure overwrite another's before it was read.
-    static LAST_ERROR: RefCell<String> = const { RefCell::new(String::new()) };
+    /// The [`Str`] written into the plugin's slot borrows this buffer, which the ABI documents as
+    /// valid only until this thread's next host call — by which time the plugin has copied it.
+    /// Per-thread because the host answers on whatever thread the plugin called from, and a shared
+    /// buffer would let one thread's failure overwrite another's before it was read.
+    static HOST_ERROR: RefCell<String> = const { RefCell::new(String::new()) };
 
     /// What the callback now running on this thread recorded on its way out, through
     /// [`continue_with_error`] or [`stop_with_error`].
@@ -413,13 +415,27 @@ thread_local! {
     static CALLBACK_ERROR: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
-fn set_last_error(message: impl std::fmt::Display) {
-    LAST_ERROR.with(|slot| {
+/// Park `message` where `error_out` can borrow it, and answer [`Status::Error`].
+///
+/// This is the whole of the host's error channel: the message travels with the call that failed,
+/// so there is nothing for the plugin to call back and ask.
+///
+/// # Safety
+///
+/// `error_out` must be null, or a writable slot for one [`Str`] belonging to the caller.
+unsafe fn fail(error_out: *mut Str, message: impl std::fmt::Display) -> Status {
+    HOST_ERROR.with(|slot| {
         let mut slot = slot.borrow_mut();
         slot.clear();
         use std::fmt::Write;
         let _ = write!(slot, "{message}");
+        if !error_out.is_null() {
+            // SAFETY: checked non-null, and the caller guarantees it is writable. The borrow points
+            // at this thread's buffer, which nothing rewrites before the plugin has copied it out.
+            unsafe { *error_out = Str::from_str(&slot) };
+        }
     });
+    Status::Error
 }
 
 /// Take whatever the callback that just returned recorded, and empty the slot.
@@ -451,61 +467,68 @@ fn record_callback_error(message: Option<String>) {
     CALLBACK_ERROR.with(|slot| *slot.borrow_mut() = message);
 }
 
-/// Recover the registry a plugin was loaded into.
+/// One loaded plugin, from the host's side of the boundary: where it registers, and who it is.
 ///
-/// This is what `host_data` is for: the loader put a pointer to its host's [`Registry`] there, so a
-/// plugin reaches them without the vtable having to hold any state of its own.
+/// This is what `host_data` points at, and there is one per plugin rather than one per host. The
+/// name in here is the answer to "who is calling", so no entry below has to ask — which is the
+/// only way to answer it at all, because a plugin that had to say its own name could say
+/// somebody else's and the host would have nothing to check it against.
+pub struct PluginData {
+    registry: &'static Registry,
+    name: &'static str,
+}
+
+impl PluginData {
+    /// The record a runtime leaks for one plugin, under the leaked name it parsed for it.
+    pub const fn new(registry: &'static Registry, name: &'static str) -> Self {
+        Self { registry, name }
+    }
+}
+
+/// Recover which plugin is calling, and the registry it was loaded into.
 ///
 /// # Safety
 ///
 /// `host_data` must be the pointer this crate's cdylib loader wrote into the plugin's context: a
-/// leaked `Registry` valid for the life of the process.
-unsafe fn registry<'a>(host_data: *mut c_void) -> Option<&'a Registry> {
+/// leaked [`PluginData`] valid for the life of the process.
+unsafe fn caller<'a>(host_data: *mut c_void) -> Option<&'a PluginData> {
     if host_data.is_null() {
         return None;
     }
-    // SAFETY: the caller guarantees this is the leaked `Registry` the loader wrote.
-    Some(unsafe { &*host_data.cast::<Registry>() })
+    // SAFETY: the caller guarantees this is the leaked `PluginData` the loader wrote.
+    Some(unsafe { &*host_data.cast::<PluginData>() })
 }
 
 unsafe extern "C" fn register_transform(
     host_data: *mut c_void,
-    owner: Str,
     hook: Str,
     priority: i32,
     callback: Callback,
     out_id: *mut u64,
+    error_out: *mut Str,
 ) -> Status {
     if out_id.is_null() {
         return Status::Error;
     }
-    // SAFETY: `host_data` is the loader's leaked `Registry`; `owner` and `hook` are valid for this
-    // call by the ABI contract and copied here; `out_id` was checked non-null and is the caller's
-    // writable local. Ownership of `callback.user_data` passes to `FfiTransform`, which frees it
-    // through the record's `drop` when the registry drop it.
+    // SAFETY: `host_data` is the loader's leaked `PluginData`; `hook` is valid for this call by the
+    // ABI contract and copied here; `out_id` was checked non-null and is the caller's writable
+    // local; `error_out` is the caller's slot. Ownership of `callback.user_data` passes to
+    // `FfiTransform`, which frees it through the record's `drop` when the registry drops it.
     unsafe {
-        let registry = match registry(host_data) {
-            Some(registry) => registry,
+        let caller = match caller(host_data) {
+            Some(caller) => caller,
             None => {
-                set_last_error("the plugin was given no registry to register into");
-                return Status::Error;
+                return fail(
+                    error_out,
+                    "the plugin was given no registry to register into",
+                );
             }
         };
-        let (owner, hook) = match (owner.to_string_lossless(), hook.to_string_lossless()) {
-            (Some(owner), Some(hook)) => (owner, hook),
-            _ => {
-                set_last_error("owner or hook name was not valid UTF-8");
-                return Status::Error;
-            }
+        let hook = match hook.to_string_lossless() {
+            Some(hook) => hook,
+            None => return fail(error_out, "the hook name was not valid UTF-8"),
         };
-        let owner = match registry.known_name(&owner) {
-            Some(owner) => owner,
-            None => {
-                set_last_error("no plugin of that name is loaded here");
-                return Status::Error;
-            }
-        };
-        let id = Context::direct(owner, registry).on_transform(
+        let id = Context::direct(caller.name, caller.registry).on_transform(
             hook.as_str(),
             priority,
             FfiTransform::new(callback),
@@ -515,49 +538,38 @@ unsafe extern "C" fn register_transform(
                 *out_id = id.get();
                 Status::Ok
             }
-            Err(error) => {
-                set_last_error(error);
-                Status::Error
-            }
+            Err(error) => fail(error_out, error),
         }
     }
 }
 
 unsafe extern "C" fn register_observe(
     host_data: *mut c_void,
-    owner: Str,
     hook: Str,
     priority: i32,
     callback: Callback,
     out_id: *mut u64,
+    error_out: *mut Str,
 ) -> Status {
     if out_id.is_null() {
         return Status::Error;
     }
     // SAFETY: see `register_transform`.
     unsafe {
-        let registry = match registry(host_data) {
-            Some(registry) => registry,
+        let caller = match caller(host_data) {
+            Some(caller) => caller,
             None => {
-                set_last_error("the plugin was given no registry to register into");
-                return Status::Error;
+                return fail(
+                    error_out,
+                    "the plugin was given no registry to register into",
+                );
             }
         };
-        let (owner, hook) = match (owner.to_string_lossless(), hook.to_string_lossless()) {
-            (Some(owner), Some(hook)) => (owner, hook),
-            _ => {
-                set_last_error("owner or hook name was not valid UTF-8");
-                return Status::Error;
-            }
+        let hook = match hook.to_string_lossless() {
+            Some(hook) => hook,
+            None => return fail(error_out, "the hook name was not valid UTF-8"),
         };
-        let owner = match registry.known_name(&owner) {
-            Some(owner) => owner,
-            None => {
-                set_last_error("no plugin of that name is loaded here");
-                return Status::Error;
-            }
-        };
-        let id = Context::direct(owner, registry).on_observe(
+        let id = Context::direct(caller.name, caller.registry).on_observe(
             hook.as_str(),
             priority,
             FfiObserve::new(callback),
@@ -567,182 +579,150 @@ unsafe extern "C" fn register_observe(
                 *out_id = id.get();
                 Status::Ok
             }
-            Err(error) => {
-                set_last_error(error);
-                Status::Error
-            }
+            Err(error) => fail(error_out, error),
         }
     }
 }
 
-unsafe extern "C" fn unregister(host_data: *mut c_void, owner: Str, id: u64) -> Status {
-    // SAFETY: `host_data` is the loader's leaked `Registry`; `owner` is valid for this call.
+unsafe extern "C" fn unregister(host_data: *mut c_void, id: u64) -> Status {
+    // SAFETY: `host_data` is the loader's leaked `PluginData`.
     unsafe {
-        let registry = match registry(host_data) {
-            Some(registry) => registry,
+        let caller = match caller(host_data) {
+            Some(caller) => caller,
             None => return Status::Error,
         };
-        let owner = match owner.to_string_lossless() {
-            Some(owner) => owner,
-            None => return Status::Error,
-        };
-        let owner = match registry.known_name(&owner) {
-            Some(owner) => owner,
-            None => return Status::Error,
-        };
-        match Context::direct(owner, registry).unregister(crate::RegistrationId::new(id)) {
+        match Context::direct(caller.name, caller.registry)
+            .unregister(crate::RegistrationId::new(id))
+        {
             true => Status::Ok,
-            false => {
-                set_last_error("no such registration for this plugin");
-                Status::Error
-            }
+            false => Status::Error,
         }
     }
 }
 
-unsafe extern "C" fn run(host_data: *mut c_void, hook: Str, data: *mut ValueHandle) -> Status {
+unsafe extern "C" fn run(
+    host_data: *mut c_void,
+    hook: Str,
+    data: *mut ValueHandle,
+    error_out: *mut Str,
+) -> Status {
     if data.is_null() {
         return Status::Error;
     }
-    // SAFETY: `host_data` is the loader's leaked `Registry`; `hook` is valid for this call; `data` is
-    // an owned handle the plugin allocated through `VALUE_API`, so it is a live `Value` and the
+    // SAFETY: `host_data` is the loader's leaked `PluginData`; `hook` is valid for this call; `data`
+    // is an owned handle the plugin allocated through `VALUE_API`, so it is a live `Value` and the
     // plugin is not touching it concurrently.
     unsafe {
-        let registry = match registry(host_data) {
-            Some(registry) => registry,
+        let caller = match caller(host_data) {
+            Some(caller) => caller,
             None => {
-                set_last_error("the plugin was given no registry to dispatch into");
-                return Status::Error;
+                return fail(
+                    error_out,
+                    "the plugin was given no registry to dispatch into",
+                );
             }
         };
         let hook = match hook.to_string_lossless() {
             Some(hook) => hook,
-            None => {
-                set_last_error("hook name was not valid UTF-8");
-                return Status::Error;
-            }
+            None => return fail(error_out, "the hook name was not valid UTF-8"),
         };
+        let registry = caller.registry;
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "tracing")] {
+                tracing::trace!(msg = "Dispatching a plugin's hook", plugin = caller.name, hook = %hook);
+            } else if #[cfg(feature = "logging")] {
+                log::trace!("msg=\"Dispatching a plugin's hook\" plugin={} hook={hook}", caller.name);
+            }
+        }
         match registry.dispatch(
             HostAccess::Direct(registry),
             hook.as_str().into(),
             as_value_mut(data),
         ) {
             Ok(()) => Status::Ok,
-            Err(error) => {
-                set_last_error(error);
-                Status::Error
-            }
+            Err(error) => fail(error_out, error),
         }
     }
 }
 
-unsafe extern "C" fn log(_host_data: *mut c_void, level: u8, message: Str) {
-    // SAFETY: `message` is valid for this call by the ABI contract, and copied before returning.
-    let text = match unsafe { message.to_string_lossless() } {
-        Some(text) => text,
-        None => return,
+unsafe extern "C" fn log(host_data: *mut c_void, level: u8, message: Str) {
+    // SAFETY: `message` is valid for this call by the ABI contract, and copied before returning;
+    // `host_data` is the loader's leaked `PluginData`.
+    let (text, plugin) = unsafe {
+        let text = match message.to_string_lossless() {
+            Some(text) => text,
+            None => return,
+        };
+        let plugin = match caller(host_data) {
+            Some(caller) => caller.name,
+            None => "?",
+        };
+        (text, plugin)
     };
     cfg_if::cfg_if! {
         if #[cfg(feature = "tracing")] {
             match level {
-                1 | 2 => tracing::warn!(msg = "Plugin reported", detail = %text),
-                3 => tracing::info!(msg = "Plugin reported", detail = %text),
-                4 => tracing::debug!(msg = "Plugin reported", detail = %text),
-                _ => tracing::trace!(msg = "Plugin reported", detail = %text),
+                1 | 2 => tracing::warn!(msg = "Plugin reported", plugin = plugin, detail = %text),
+                3 => tracing::info!(msg = "Plugin reported", plugin = plugin, detail = %text),
+                4 => tracing::debug!(msg = "Plugin reported", plugin = plugin, detail = %text),
+                _ => tracing::trace!(msg = "Plugin reported", plugin = plugin, detail = %text),
             }
         } else if #[cfg(feature = "logging")] {
             match level {
-                1 | 2 => log::warn!("msg=\"Plugin reported\" detail={text:?}"),
-                3 => log::info!("msg=\"Plugin reported\" detail={text:?}"),
-                4 => log::debug!("msg=\"Plugin reported\" detail={text:?}"),
-                _ => log::trace!("msg=\"Plugin reported\" detail={text:?}"),
+                1 | 2 => log::warn!("msg=\"Plugin reported\" plugin={plugin} detail={text:?}"),
+                3 => log::info!("msg=\"Plugin reported\" plugin={plugin} detail={text:?}"),
+                4 => log::debug!("msg=\"Plugin reported\" plugin={plugin} detail={text:?}"),
+                _ => log::trace!("msg=\"Plugin reported\" plugin={plugin} detail={text:?}"),
             }
         } else {
-            let _ = (level, text);
+            let _ = (level, text, plugin);
         }
     }
 }
 
-unsafe extern "C" fn last_error(_host_data: *mut c_void, out: *mut Str) -> Status {
-    if out.is_null() {
-        return Status::Error;
-    }
-    LAST_ERROR.with(|slot| {
-        let slot = slot.borrow();
-        // SAFETY: `out` was checked non-null. The slice borrows this thread's error buffer, which
-        // the ABI documents as valid only until this thread's next host call.
-        unsafe { *out = Str::from_str(&slot) };
-    });
-    Status::Ok
-}
-
 unsafe extern "C" fn export(
     host_data: *mut c_void,
-    owner: Str,
     name: Str,
     function: ApiFunction,
     out_id: *mut u64,
+    error_out: *mut Str,
 ) -> Status {
     if out_id.is_null() {
         return Status::Error;
     }
     // SAFETY: as `register_transform` — ownership of `function.user_data` passes to `FfiApi`.
     unsafe {
-        let registry = match registry(host_data) {
-            Some(registry) => registry,
-            None => {
-                set_last_error("the plugin was given no registry to export into");
-                return Status::Error;
-            }
+        let caller = match caller(host_data) {
+            Some(caller) => caller,
+            None => return fail(error_out, "the plugin was given no registry to export into"),
         };
-        let (owner, name) = match (owner.to_string_lossless(), name.to_string_lossless()) {
-            (Some(owner), Some(name)) => (owner, name),
-            _ => {
-                set_last_error("owner or function name was not valid UTF-8");
-                return Status::Error;
-            }
+        let name = match name.to_string_lossless() {
+            Some(name) => name,
+            None => return fail(error_out, "the function name was not valid UTF-8"),
         };
-        let owner = match registry.known_name(&owner) {
-            Some(owner) => owner,
-            None => {
-                set_last_error("no plugin of that name is loaded here");
-                return Status::Error;
-            }
-        };
-        match Context::direct(owner, registry).export(name.as_str(), FfiApi::new(function)) {
+        match Context::direct(caller.name, caller.registry)
+            .export(name.as_str(), FfiApi::new(function))
+        {
             Ok(id) => {
                 *out_id = id.get();
                 Status::Ok
             }
-            Err(error) => {
-                set_last_error(error);
-                Status::Error
-            }
+            Err(error) => fail(error_out, error),
         }
     }
 }
 
-unsafe extern "C" fn unexport(host_data: *mut c_void, owner: Str, id: u64) -> Status {
+unsafe extern "C" fn unexport(host_data: *mut c_void, id: u64) -> Status {
     // SAFETY: see `unregister`.
     unsafe {
-        let registry = match registry(host_data) {
-            Some(registry) => registry,
+        let caller = match caller(host_data) {
+            Some(caller) => caller,
             None => return Status::Error,
         };
-        let owner = match owner.to_string_lossless() {
-            Some(owner) => owner,
-            None => return Status::Error,
-        };
-        let owner = match registry.known_name(&owner) {
-            Some(owner) => owner,
-            None => return Status::Error,
-        };
-        match Context::direct(owner, registry).unexport(crate::RegistrationId::new(id)) {
+        match Context::direct(caller.name, caller.registry).unexport(crate::RegistrationId::new(id))
+        {
             true => Status::Ok,
-            false => {
-                set_last_error("no such export for this plugin");
-                Status::Error
-            }
+            false => Status::Error,
         }
     }
 }
@@ -752,32 +732,28 @@ unsafe extern "C" fn plugin_call(
     target: Str,
     args: *const ValueHandle,
     out: *mut *mut ValueHandle,
+    error_out: *mut Str,
 ) -> Status {
     if out.is_null() {
         return Status::Error;
     }
-    // SAFETY: `host_data` is the loader's leaked `Registry`; `target` is valid for this call; `args`
-    // is an owned handle the plugin allocated through `VALUE_API`, borrowed and copied here; `out`
-    // was checked non-null and receives a handle the host owns until the plugin releases it.
+    // SAFETY: `host_data` is the loader's leaked `PluginData`; `target` is valid for this call;
+    // `args` is an owned handle the plugin allocated through `VALUE_API`, borrowed and copied here;
+    // `out` was checked non-null and receives a handle the host owns until the plugin releases it.
     unsafe {
-        let registry = match registry(host_data) {
-            Some(registry) => registry,
-            None => {
-                set_last_error("the plugin was given no registry to call into");
-                return Status::Error;
-            }
+        let caller = match caller(host_data) {
+            Some(caller) => caller,
+            None => return fail(error_out, "the plugin was given no registry to call into"),
         };
         let target = match target.to_string_lossless() {
             Some(target) => target,
-            None => {
-                set_last_error("target name was not valid UTF-8");
-                return Status::Error;
-            }
+            None => return fail(error_out, "the target name was not valid UTF-8"),
         };
         let arguments = match args.is_null() {
             true => Value::map(),
             false => as_value(args).clone(),
         };
+        let registry = caller.registry;
         match registry.plugin_call(HostAccess::Direct(registry), target.as_str(), arguments) {
             Ok(value) => {
                 *out = own(value);
@@ -787,10 +763,7 @@ unsafe extern "C" fn plugin_call(
                 *out = own(*error);
                 Status::Error
             }
-            Err(error) => {
-                set_last_error(error);
-                Status::Error
-            }
+            Err(error) => fail(error_out, error),
         }
     }
 }
@@ -800,30 +773,26 @@ unsafe extern "C" fn host_call(
     name: Str,
     args: *const ValueHandle,
     out: *mut *mut ValueHandle,
+    error_out: *mut Str,
 ) -> Status {
     if out.is_null() {
         return Status::Error;
     }
     // SAFETY: see `plugin_call`.
     unsafe {
-        let registry = match registry(host_data) {
-            Some(registry) => registry,
-            None => {
-                set_last_error("the plugin was given no registry to call into");
-                return Status::Error;
-            }
+        let caller = match caller(host_data) {
+            Some(caller) => caller,
+            None => return fail(error_out, "the plugin was given no registry to call into"),
         };
         let name = match name.to_string_lossless() {
             Some(name) => name,
-            None => {
-                set_last_error("function name was not valid UTF-8");
-                return Status::Error;
-            }
+            None => return fail(error_out, "the function name was not valid UTF-8"),
         };
         let arguments = match args.is_null() {
             true => Value::map(),
             false => as_value(args).clone(),
         };
+        let registry = caller.registry;
         match registry.host_call(HostAccess::Direct(registry), name.as_str(), arguments) {
             Ok(value) => {
                 *out = own(value);
@@ -833,10 +802,7 @@ unsafe extern "C" fn host_call(
                 *out = own(*error);
                 Status::Error
             }
-            Err(error) => {
-                set_last_error(error);
-                Status::Error
-            }
+            Err(error) => fail(error_out, error),
         }
     }
 }
@@ -852,7 +818,6 @@ pub static HOST_API: HostApi = HostApi {
     log,
     continue_with_error,
     stop_with_error,
-    last_error,
     export,
     unexport,
     plugin_call,

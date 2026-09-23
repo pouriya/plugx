@@ -56,7 +56,7 @@ process.
 - **One global, and it holds a pointer, not a registry.** `registry::REGISTRY` is the only `static` in
   the crate holding state: the registry one `Host` leaked, installed when it is built and cleared
   when it is dropped. A plugin `.so` links its own copy of this crate and so gets its own copy of
-  that slot, which nothing ever fills — so `run` inside a plugin returns `Error::NoHost` instead of
+  that slot, which nothing ever fills — so `run` inside a plugin returns `Error::NotInitialized` instead of
   swallowing the call into a private, permanently empty table. Adding a second global, or filling
   the slot from anywhere but `Host`, brings back the silent dead registry this design removed.
 - **One live `Host` per process.** `Host::new` claims the slot and fails with `Error::HostExists`
@@ -89,8 +89,16 @@ process.
   because the name is what it is asking for. A runtime that forgets to stamp produces plugins the
   host refuses as unnamed.
 - **A plugin exports one symbol per operation.** `plugx_abi_version`, `plugx_info`, `plugx_start`,
-  `plugx_reload`, `plugx_stop`, `plugx_last_error`. The host resolves them by name after the
-  version check. Adding an operation appends a symbol; a host treats a missing one as unsupported.
+  `plugx_reload`, `plugx_stop`. The host resolves them by name after the version check. Adding an
+  operation appends a symbol; a host treats a missing one as unsupported.
+- **`host_data` is per plugin, not per host.** The cdylib runtime leaks one `PluginData` — registry
+  plus leaked name — for each library it loads and puts that pointer in the context. It is what
+  answers "who is calling", so no ABI entry takes an `owner`: a plugin cannot tag a registration
+  with somebody else's name, because it never gets to say a name at all.
+- **A failure travels with the call that failed.** Whoever fails writes a message into the
+  `error_out` it was handed and the other side copies it out on return, in both directions. There
+  is no "ask me why" entry point: a second crossing to fetch a message the first one already had is
+  a race waiting to happen, and it was `plugx_last_error`.
 
 ## `unsafe`
 

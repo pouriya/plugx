@@ -15,9 +15,13 @@
 //!   arrives as function pointers inside [`Context`].
 //!
 //! A plugin exports one symbol per lifecycle operation — [`VERSION_SYMBOL`], [`INFO_SYMBOL`],
-//! [`START_SYMBOL`], [`RELOAD_SYMBOL`], [`STOP_SYMBOL`], [`LAST_ERROR_SYMBOL`] — and the host
-//! resolves them by name. There is no entry point and no vtable coming back: every call but the
-//! version check takes a [`Context`], which is the only thing that leads to the host.
+//! [`START_SYMBOL`], [`RELOAD_SYMBOL`], [`STOP_SYMBOL`] — and the host resolves them by name.
+//! There is no entry point and no vtable coming back: every call but the version check takes a
+//! [`Context`], which is the only thing that leads to the host.
+//!
+//! Failures travel with the call that failed, in both directions: whoever fails writes a message
+//! into the `error_out` it was handed, and the other side copies it out the moment the call
+//! returns. Nobody ever calls back to ask.
 
 /// The callback records a host stores on a plugin's behalf.
 pub mod callback;
@@ -36,8 +40,8 @@ pub use crate::abi::AbiVersion;
 pub use callback::{ApiCallFn, ApiFunction, Callback, CallbackFn, DropFn};
 pub use context::{Context, HostApi};
 pub use plugin::{
-    INFO_SYMBOL, InfoFn, LAST_ERROR_SYMBOL, LastErrorFn, RELOAD_SYMBOL, ReloadFn, START_SYMBOL,
-    STOP_SYMBOL, StartFn, StopFn, VERSION_SYMBOL, VersionFn,
+    INFO_SYMBOL, InfoFn, RELOAD_SYMBOL, ReloadFn, START_SYMBOL, STOP_SYMBOL, StartFn, StopFn,
+    VERSION_SYMBOL, VersionFn,
 };
 pub use primitive::{ABI_VERSION, Status, Str};
 pub use value::{ValueApi, ValueHandle};

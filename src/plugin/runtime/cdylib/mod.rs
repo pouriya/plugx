@@ -9,11 +9,11 @@ pub mod vtable;
 /// Wrapping a plugin's `repr(C)` callbacks and vtable back into Rust traits.
 pub mod wrap;
 
-use self::vtable::HOST_API;
+use self::vtable::{HOST_API, PluginData};
 use self::wrap::{FfiPlugin, PluginSymbols};
 use crate::abi::cdylib::{
-    ABI_VERSION, Context, INFO_SYMBOL, InfoFn, LAST_ERROR_SYMBOL, LastErrorFn, RELOAD_SYMBOL,
-    ReloadFn, START_SYMBOL, STOP_SYMBOL, StartFn, StopFn, Str, VERSION_SYMBOL, VersionFn,
+    ABI_VERSION, Context, INFO_SYMBOL, InfoFn, RELOAD_SYMBOL, ReloadFn, START_SYMBOL, STOP_SYMBOL,
+    StartFn, StopFn, Str, VERSION_SYMBOL, VersionFn,
 };
 use crate::plugin::Plugin;
 use crate::plugin::load::{Artifact, Content};
@@ -172,9 +172,11 @@ impl Runtime for Cdylib {
         let name: &'static str = Box::leak(name.to_string().into_boxed_str());
 
         // The plugin is handed this on every call, and the ABI lets it borrow the pieces for the
-        // life of the process, so it is leaked. `host_data` is the registry this plugin registers
-        // into.
-        let host_data = std::ptr::from_ref(registry).cast::<c_void>().cast_mut();
+        // life of the process, so it is leaked. `host_data` is this plugin's own record — the
+        // registry it registers into, and the name everything it registers is tagged with. One
+        // per plugin, which is how the host answers "who is calling" without asking.
+        let data: &'static PluginData = Box::leak(Box::new(PluginData::new(registry, name)));
+        let host_data = std::ptr::from_ref(data).cast::<c_void>().cast_mut();
         let context: &'static Context = Box::leak(Box::new(Context {
             size: size_of::<Context>(),
             abi: ABI_VERSION,
@@ -203,16 +205,11 @@ impl Runtime for Cdylib {
                 Ok(symbol) => symbol,
                 Err(_) => return Err(missing("plugx_stop", artifact.source)),
             };
-            let last_error: Symbol<'static, LastErrorFn> = match library.get(LAST_ERROR_SYMBOL) {
-                Ok(symbol) => symbol,
-                Err(_) => return Err(missing("plugx_last_error", artifact.source)),
-            };
             PluginSymbols {
                 info: *info,
                 start: *start,
                 reload: *reload,
                 stop: *stop,
-                last_error: *last_error,
             }
         };
 

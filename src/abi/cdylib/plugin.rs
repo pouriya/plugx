@@ -22,27 +22,36 @@ pub const RELOAD_SYMBOL: &[u8] = b"plugx_reload\0";
 /// The symbol a plugin exports to be torn down. Signature: [`StopFn`].
 pub const STOP_SYMBOL: &[u8] = b"plugx_stop\0";
 
-/// The symbol a plugin exports to explain its last failure. Signature: [`LastErrorFn`].
-pub const LAST_ERROR_SYMBOL: &[u8] = b"plugx_last_error\0";
-
 /// The signature of [`VERSION_SYMBOL`].
 pub type VersionFn = unsafe extern "C" fn() -> AbiVersion;
+
+// Every signature below but `VersionFn` takes an `error_out` last, and writes a message into it
+// before returning anything but `Status::Ok`. The host copies it immediately, so a `static` or
+// thread-local buffer in the plugin is enough; `error_out` may be null, and a plugin with nothing
+// to say leaves it alone. Nobody ever calls back to ask: that is what `plugx_last_error` used to
+// be, and it cost two crossings for one message.
 
 /// The signature of [`INFO_SYMBOL`].
 ///
 /// Reports the plugin's version, description, configuration spec and dependencies as a value tree.
 /// The tree is allocated with the host's own [`ValueApi`](crate::abi::cdylib::ValueApi), so ownership of
 /// the handle written to `out` passes to the host, which releases it.
-pub type InfoFn =
-    unsafe extern "C" fn(context: *const Context, out: *mut *mut ValueHandle) -> Status;
+pub type InfoFn = unsafe extern "C" fn(
+    context: *const Context,
+    out: *mut *mut ValueHandle,
+    error_out: *mut Str,
+) -> Status;
 
 /// The signature of [`START_SYMBOL`].
 ///
 /// Brings the plugin up with `config` and lets it register its hook callbacks and export its
 /// functions — all through the [`Context`] passed here, which is the only thing that leads back to
 /// the host.
-pub type StartFn =
-    unsafe extern "C" fn(context: *const Context, config: *const ValueHandle) -> Status;
+pub type StartFn = unsafe extern "C" fn(
+    context: *const Context,
+    config: *const ValueHandle,
+    error_out: *mut Str,
+) -> Status;
 
 /// The signature of [`RELOAD_SYMBOL`].
 ///
@@ -52,6 +61,7 @@ pub type ReloadFn = unsafe extern "C" fn(
     context: *const Context,
     old_config: *const ValueHandle,
     new_config: *const ValueHandle,
+    error_out: *mut Str,
 ) -> Status;
 
 /// The signature of [`STOP_SYMBOL`].
@@ -59,10 +69,4 @@ pub type ReloadFn = unsafe extern "C" fn(
 /// The host calls this only after it has drained this plugin's callbacks and exported functions
 /// and waited for every in-flight dispatch and call to finish, so nothing can still be running
 /// against the state being torn down here.
-pub type StopFn = unsafe extern "C" fn(context: *const Context) -> Status;
-
-/// The signature of [`LAST_ERROR_SYMBOL`].
-///
-/// Borrows the message describing why the last call into this plugin, on this thread, returned
-/// [`Status::Error`]. Valid until the next call into the plugin.
-pub type LastErrorFn = unsafe extern "C" fn(out: *mut Str) -> Status;
+pub type StopFn = unsafe extern "C" fn(context: *const Context, error_out: *mut Str) -> Status;

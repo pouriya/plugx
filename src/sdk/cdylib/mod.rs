@@ -1,6 +1,6 @@
 //! # Building a cdylib plugin in Rust
 //!
-//! Two halves of one boundary. [`export`] is what the host calls *in*: the bodies behind the six
+//! Two halves of one boundary. [`export`] is what the host calls *in*: the bodies behind the five
 //! `plugx_*` symbols [`export_plugin!`](crate::export_plugin) writes. [`host`] is what the plugin
 //! calls *out*: the host's `extern "C"` table, behind the same
 //! [`Context`](crate::Context) API that code linked into the host uses.
@@ -54,50 +54,61 @@ macro_rules! export_plugin {
         ///
         /// # Safety
         ///
-        /// `context` must be the context a plugx host passed, and `out` a writable location for
-        /// one owned value handle.
+        /// `context` must be the context a plugx host passed, `out` a writable location for one
+        /// owned value handle, and `error_out` null or a writable location for one string.
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn plugx_info(
             context: *const $crate::AbiContext,
             out: *mut *mut $crate::abi::cdylib::ValueHandle,
+            error_out: *mut $crate::abi::cdylib::Str,
         ) -> $crate::abi::cdylib::Status {
             // SAFETY: forwarded straight from the host, under the same contract this function
             // documents.
-            unsafe { $crate::sdk::cdylib::export::info(context, out, __plugx_plugin) }
+            unsafe { $crate::sdk::cdylib::export::info(context, out, error_out, __plugx_plugin) }
         }
 
         /// Brings the plugin up with its configuration.
         ///
         /// # Safety
         ///
-        /// `context` must be the context a plugx host passed, and `config` a live handle the host
-        /// owns.
+        /// `context` must be the context a plugx host passed, `config` a live handle the host
+        /// owns, and `error_out` null or a writable location for one string.
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn plugx_start(
             context: *const $crate::AbiContext,
             config: *const $crate::abi::cdylib::ValueHandle,
+            error_out: *mut $crate::abi::cdylib::Str,
         ) -> $crate::abi::cdylib::Status {
             // SAFETY: forwarded straight from the host, under the same contract this function
             // documents.
-            unsafe { $crate::sdk::cdylib::export::start(context, config, __plugx_plugin) }
+            unsafe {
+                $crate::sdk::cdylib::export::start(context, config, error_out, __plugx_plugin)
+            }
         }
 
         /// Hands the plugin a new configuration.
         ///
         /// # Safety
         ///
-        /// `context` must be the context a plugx host passed, and both handles live and owned by
-        /// the host.
+        /// `context` must be the context a plugx host passed, both handles live and owned by the
+        /// host, and `error_out` null or a writable location for one string.
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn plugx_reload(
             context: *const $crate::AbiContext,
             old_config: *const $crate::abi::cdylib::ValueHandle,
             new_config: *const $crate::abi::cdylib::ValueHandle,
+            error_out: *mut $crate::abi::cdylib::Str,
         ) -> $crate::abi::cdylib::Status {
             // SAFETY: forwarded straight from the host, under the same contract this function
             // documents.
             unsafe {
-                $crate::sdk::cdylib::export::reload(context, old_config, new_config, __plugx_plugin)
+                $crate::sdk::cdylib::export::reload(
+                    context,
+                    old_config,
+                    new_config,
+                    error_out,
+                    __plugx_plugin,
+                )
             }
         }
 
@@ -105,28 +116,16 @@ macro_rules! export_plugin {
         ///
         /// # Safety
         ///
-        /// `context` must be the context a plugx host passed.
+        /// `context` must be the context a plugx host passed, and `error_out` null or a writable
+        /// location for one string.
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn plugx_stop(
             context: *const $crate::AbiContext,
+            error_out: *mut $crate::abi::cdylib::Str,
         ) -> $crate::abi::cdylib::Status {
             // SAFETY: forwarded straight from the host, under the same contract this function
             // documents.
-            unsafe { $crate::sdk::cdylib::export::stop(context, __plugx_plugin) }
-        }
-
-        /// Why the last call into this plugin, on this thread, failed.
-        ///
-        /// # Safety
-        ///
-        /// `out` must be a writable location for one slice.
-        #[unsafe(no_mangle)]
-        pub unsafe extern "C" fn plugx_last_error(
-            out: *mut $crate::abi::cdylib::Str,
-        ) -> $crate::abi::cdylib::Status {
-            // SAFETY: forwarded straight from the host, under the same contract this function
-            // documents.
-            unsafe { $crate::sdk::cdylib::export::last_error(out) }
+            unsafe { $crate::sdk::cdylib::export::stop(context, error_out, __plugx_plugin) }
         }
     };
 }

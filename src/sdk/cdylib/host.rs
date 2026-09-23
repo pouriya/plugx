@@ -61,22 +61,6 @@ impl HostRef {
         unsafe { &*self.api().value }
     }
 
-    /// The host's description of why its last call from this thread failed.
-    fn last_error(&self) -> Box<str> {
-        let mut slice = Str::EMPTY;
-        // SAFETY: module contract. `slice` is a stack local, read only after the host reports
-        // success; the borrow is copied out before this returns.
-        unsafe {
-            if (self.api().last_error)(self.data, &mut slice) != Status::Ok {
-                return Box::from("");
-            }
-            match slice.to_string_lossless() {
-                Some(message) => message.into_boxed_str(),
-                None => Box::from(""),
-            }
-        }
-    }
-
     /// Hand the host whatever a callback recorded on its way out, and take back the status that
     /// callback should return.
     ///
@@ -112,6 +96,7 @@ impl HostRef {
             Str,
             *const ValueHandle,
             *mut *mut ValueHandle,
+            *mut Str,
         ) -> Status,
         args: Value,
     ) -> Result<Value> {
@@ -127,7 +112,14 @@ impl HostRef {
                 });
             }
             let mut out: *mut ValueHandle = std::ptr::null_mut();
-            let status = entry(self.data, Str::from_str(target), arguments, &mut out);
+            let mut error = Str::EMPTY;
+            let status = entry(
+                self.data,
+                Str::from_str(target),
+                arguments,
+                &mut out,
+                &mut error,
+            );
             (api.release)(arguments);
 
             let returned = match out.is_null() {
@@ -150,7 +142,7 @@ impl HostRef {
                     }),
                     None => Err(Error::Ffi {
                         operation: target.into(),
-                        message: self.last_error(),
+                        message: host_message(error),
                     }),
                 },
             }
@@ -177,7 +169,8 @@ impl HostOps for HostRef {
                     message: "the host would not allocate the payload".into(),
                 });
             }
-            let status = (self.api().run)(self.data, Str::from_str(hook), handle);
+            let mut error = Str::EMPTY;
+            let status = (self.api().run)(self.data, Str::from_str(hook), handle, &mut error);
             let updated = marshal::from_handle(api, handle);
             (api.release)(handle);
 
@@ -190,7 +183,7 @@ impl HostOps for HostRef {
                 }
                 _ => Err(Error::Ffi {
                     operation: hook.into(),
-                    message: self.last_error(),
+                    message: host_message(error),
                 }),
             }
         }
@@ -214,24 +207,25 @@ impl HostOps for HostRef {
             drop: Some(free::<TransformClosure>),
         };
         let mut id = 0u64;
-        // SAFETY: module contract. `id` is a stack local, read only after the host reports
-        // success; ownership of `record.user_data` passes to the host, which frees it through the
-        // record's `drop`.
+        let mut error = Str::EMPTY;
+        // SAFETY: module contract. `id` and `error` are stack locals, read only after the host has
+        // written them; ownership of `record.user_data` passes to the host, which frees it through
+        // the record's `drop`.
         let status = unsafe {
             (self.api().register_transform)(
                 self.data,
-                Str::from_str(context.name()),
                 Str::from_str(hook),
                 priority,
                 record,
                 &mut id,
+                &mut error,
             )
         };
         match status {
             Status::Ok => Ok(RegistrationId::new(id)),
             _ => Err(Error::Ffi {
                 operation: hook.into(),
-                message: self.last_error(),
+                message: host_message(error),
             }),
         }
     }
@@ -254,31 +248,31 @@ impl HostOps for HostRef {
             drop: Some(free::<ObserveClosure>),
         };
         let mut id = 0u64;
+        let mut error = Str::EMPTY;
         // SAFETY: see `register_transform`.
         let status = unsafe {
             (self.api().register_observe)(
                 self.data,
-                Str::from_str(context.name()),
                 Str::from_str(hook),
                 priority,
                 record,
                 &mut id,
+                &mut error,
             )
         };
         match status {
             Status::Ok => Ok(RegistrationId::new(id)),
             _ => Err(Error::Ffi {
                 operation: hook.into(),
-                message: self.last_error(),
+                message: host_message(error),
             }),
         }
     }
 
-    fn unregister(&self, owner: &str, registration: RegistrationId) -> bool {
-        // SAFETY: module contract. `owner` is borrowed for this call only, which is what `Str`
-        // documents.
-        let status =
-            unsafe { (self.api().unregister)(self.data, Str::from_str(owner), registration.get()) };
+    fn unregister(&self, registration: RegistrationId) -> bool {
+        // SAFETY: module contract. The host looks the id up under whoever `self.data` says is
+        // calling, so there is no name to pass and none to get wrong.
+        let status = unsafe { (self.api().unregister)(self.data, registration.get()) };
         status == Status::Ok
     }
 
@@ -299,30 +293,24 @@ impl HostOps for HostRef {
             drop: Some(free::<FunctionClosure>),
         };
         let mut id = 0u64;
+        let mut error = Str::EMPTY;
         // SAFETY: module contract. Ownership of `record.user_data` passes to the host, which frees
         // it through the record's `drop` once the function has been drained and quiesced.
         let status = unsafe {
-            (self.api().export)(
-                self.data,
-                Str::from_str(context.name()),
-                Str::from_str(name),
-                record,
-                &mut id,
-            )
+            (self.api().export)(self.data, Str::from_str(name), record, &mut id, &mut error)
         };
         match status {
             Status::Ok => Ok(RegistrationId::new(id)),
             _ => Err(Error::Ffi {
                 operation: name.into(),
-                message: self.last_error(),
+                message: host_message(error),
             }),
         }
     }
 
-    fn unexport(&self, owner: &str, registration: RegistrationId) -> bool {
+    fn unexport(&self, registration: RegistrationId) -> bool {
         // SAFETY: module contract.
-        let status =
-            unsafe { (self.api().unexport)(self.data, Str::from_str(owner), registration.get()) };
+        let status = unsafe { (self.api().unexport)(self.data, registration.get()) };
         status == Status::Ok
     }
 
@@ -343,6 +331,18 @@ impl HostOps for HostRef {
     fn host_call(&self, name: &str, args: Value) -> Result<Value> {
         let entry = self.api().host_call;
         self.call(name, "host", entry, args)
+    }
+}
+
+/// Copy out whatever the host wrote into an `error_out`.
+///
+/// Empty when it wrote nothing, or wrote something that was not UTF-8. The ABI gives the borrow
+/// until this thread's next host call, and this runs before any of those.
+fn host_message(error: Str) -> Box<str> {
+    // SAFETY: `error` is what the call that just returned wrote, still valid on this thread.
+    match unsafe { error.to_string_lossless() } {
+        Some(message) => message.into_boxed_str(),
+        None => Box::from(""),
     }
 }
 

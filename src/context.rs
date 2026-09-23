@@ -48,8 +48,8 @@ pub(crate) trait HostOps: Send + Sync {
         priority: i32,
         callback: Arc<dyn Observe>,
     ) -> Result<RegistrationId>;
-    /// Withdraw one of `owner`'s registrations. Whether it was there.
-    fn unregister(&self, owner: &str, registration: RegistrationId) -> bool;
+    /// Withdraw one of this plugin's registrations. Whether it was there.
+    fn unregister(&self, registration: RegistrationId) -> bool;
     /// Publish a function under `context`'s name.
     fn export(
         &self,
@@ -57,8 +57,8 @@ pub(crate) trait HostOps: Send + Sync {
         name: &str,
         function: Arc<dyn ApiFn>,
     ) -> Result<RegistrationId>;
-    /// Withdraw one of `owner`'s functions. Whether it was there.
-    fn unexport(&self, owner: &str, registration: RegistrationId) -> bool;
+    /// Withdraw one of this plugin's functions. Whether it was there.
+    fn unexport(&self, registration: RegistrationId) -> bool;
     /// Call `plugin::function` through the host.
     fn plugin_call(&self, target: &str, args: Value) -> Result<Value>;
     /// Call one of the application's own functions through the host.
@@ -206,7 +206,7 @@ impl Context {
     pub fn unregister(&self, registration: RegistrationId) -> bool {
         match self.access {
             HostAccess::Direct(registry) => registry.unregister(self.name, registration),
-            HostAccess::Foreign(host) => host.unregister(self.name, registration),
+            HostAccess::Foreign(host) => host.unregister(registration),
         }
     }
 
@@ -227,7 +227,7 @@ impl Context {
     pub fn unexport(&self, registration: RegistrationId) -> bool {
         match self.access {
             HostAccess::Direct(registry) => registry.unexport(self.name, registration),
-            HostAccess::Foreign(host) => host.unexport(self.name, registration),
+            HostAccess::Foreign(host) => host.unexport(registration),
         }
     }
 

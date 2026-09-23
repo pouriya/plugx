@@ -1,7 +1,7 @@
 /* plugx C ABI, version 3.0.0.
  *
  * Everything a plugin written in C needs, and nothing else: there is no plugx library to link
- * against. A plugin is a shared object that defines the six `plugx_*` symbols at the bottom of
+ * against. A plugin is a shared object that defines the five `plugx_*` symbols at the bottom of
  * this file; the host resolves them by name after checking the version.
  *
  * The rules this header encodes:
@@ -11,6 +11,9 @@
  *   - Nothing owned by one side is freed by the other. Strings cross as `PlugxStr`, which the
  *     receiver copies immediately; value trees cross as opaque handles, built and released through
  *     the host's `PlugxValueApi`.
+ *   - A failure travels with the call that failed. Whoever fails writes a message into the
+ *     `error_out` it was handed, and the other side copies it out the moment the call returns.
+ *     Nobody calls back to ask.
  *   - Never resolve symbols back into the host. Everything reachable arrives as function pointers
  *     inside `PlugxContext`.
  *
@@ -169,21 +172,28 @@ typedef struct PlugxApiFunction {
 
 /* ---- what the host offers ----------------------------------------------------------------- */
 
-/* Every entry takes `host_data` first: the opaque pointer from the context, which is how the host
- * finds its own registry. Registration entries take the plugin's own name as `owner` — the name is
- * the identity in this ABI, and there is no separate id. */
+/* Every entry takes `host_data` first: the opaque pointer from the context. It is per *plugin*, not
+ * per host — a host hands a different one to each library it loads — so the host already knows who
+ * is calling. That is why nothing here names an owner: your registrations are tagged with the name
+ * the host loaded you under, which you cannot spell wrong and cannot spell as somebody else.
+ *
+ * Every entry that can fail also takes an `error_out` last, and writes a message into it before
+ * returning anything but PLUGX_OK. Copy it immediately; it borrows a buffer the host reuses on your
+ * next call. Pass NULL if you do not care, and initialise it to a zero PlugxStr otherwise, because
+ * a host with nothing to say leaves it alone. `unregister` and `unexport` have none: their whole
+ * answer is whether the registration was there. */
 typedef struct PlugxHostApi {
   size_t size;
 
   const PlugxValueApi *value;
 
-  PlugxStatus (*register_transform)(void *host_data, PlugxStr owner, PlugxStr hook,
-                                    int32_t priority, PlugxCallback callback, uint64_t *out_id);
-  PlugxStatus (*register_observe)(void *host_data, PlugxStr owner, PlugxStr hook,
-                                  int32_t priority, PlugxCallback callback, uint64_t *out_id);
-  PlugxStatus (*unregister)(void *host_data, PlugxStr owner, uint64_t id);
+  PlugxStatus (*register_transform)(void *host_data, PlugxStr hook, int32_t priority,
+                                    PlugxCallback callback, uint64_t *out_id, PlugxStr *error_out);
+  PlugxStatus (*register_observe)(void *host_data, PlugxStr hook, int32_t priority,
+                                  PlugxCallback callback, uint64_t *out_id, PlugxStr *error_out);
+  PlugxStatus (*unregister)(void *host_data, uint64_t id);
 
-  PlugxStatus (*run)(void *host_data, PlugxStr hook, PlugxValue *data);
+  PlugxStatus (*run)(void *host_data, PlugxStr hook, PlugxValue *data, PlugxStr *error_out);
 
   void (*log)(void *host_data, uint8_t level, PlugxStr message);
 
@@ -192,20 +202,21 @@ typedef struct PlugxHostApi {
   PlugxStatus (*continue_with_error)(void *host_data, PlugxStr message);
   PlugxStatus (*stop_with_error)(void *host_data, PlugxStr message);
 
-  PlugxStatus (*last_error)(void *host_data, PlugxStr *out);
-
-  PlugxStatus (*export_fn)(void *host_data, PlugxStr owner, PlugxStr name,
-                           PlugxApiFunction function, uint64_t *out_id);
-  PlugxStatus (*unexport)(void *host_data, PlugxStr owner, uint64_t id);
+  PlugxStatus (*export_fn)(void *host_data, PlugxStr name, PlugxApiFunction function,
+                           uint64_t *out_id, PlugxStr *error_out);
+  PlugxStatus (*unexport)(void *host_data, uint64_t id);
 
   PlugxStatus (*plugin_call)(void *host_data, PlugxStr target, const PlugxValue *args,
-                             PlugxValue **out);
+                             PlugxValue **out, PlugxStr *error_out);
   PlugxStatus (*host_call)(void *host_data, PlugxStr name, const PlugxValue *args,
-                           PlugxValue **out);
+                           PlugxValue **out, PlugxStr *error_out);
 } PlugxHostApi;
 
 /* What the host passes to every symbol below. Borrowed for the call — but `host`, `host_data` and
- * the bytes behind `plugin_name` outlive the process, because a host never unloads a plugin. */
+ * the bytes behind `plugin_name` outlive the process, because a host never unloads a plugin.
+ *
+ * `host_data` is yours alone: it is how the host knows which plugin is calling. Hand it back
+ * unchanged and never hand out a copy. */
 typedef struct PlugxContext {
   size_t size;
   PlugxAbiVersion abi;
@@ -220,22 +231,25 @@ typedef struct PlugxContext {
  * abandoned before it has been given anything. */
 PlugxAbiVersion plugx_abi_version(void);
 
+/* Each of these takes an `error_out` last, and the rule is the mirror of the host's: write a
+ * message into it before returning anything but PLUGX_OK, and point it at storage that stays valid
+ * until the next call into you — a `static` buffer is enough, because the host copies it out
+ * straight away. It may be NULL. */
+
 /* Describe yourself: write an owned map to `out` with a "version" string ("1.0.0") and, if you
  * like, a "description" string, a "config_spec" tree and a "dependencies" list. */
-PlugxStatus plugx_info(const PlugxContext *context, PlugxValue **out);
+PlugxStatus plugx_info(const PlugxContext *context, PlugxValue **out, PlugxStr *error_out);
 
 /* Come up: register hook callbacks and export functions, all through `context`. */
-PlugxStatus plugx_start(const PlugxContext *context, const PlugxValue *config);
+PlugxStatus plugx_start(const PlugxContext *context, const PlugxValue *config,
+                        PlugxStr *error_out);
 
 /* Take a new configuration. Return PLUGX_UNSUPPORTED and the host stops and starts you instead. */
 PlugxStatus plugx_reload(const PlugxContext *context, const PlugxValue *old_config,
-                         const PlugxValue *new_config);
+                         const PlugxValue *new_config, PlugxStr *error_out);
 
 /* Tear down. Everything you registered is already out of the host's registry and quiesced. */
-PlugxStatus plugx_stop(const PlugxContext *context);
-
-/* Why the last call into this plugin failed. The slice must stay valid until the next call. */
-PlugxStatus plugx_last_error(PlugxStr *out);
+PlugxStatus plugx_stop(const PlugxContext *context, PlugxStr *error_out);
 
 /* Borrow a NUL-terminated C string as a PlugxStr. The terminator is not included. */
 static inline PlugxStr plugx_str(const char *text) {

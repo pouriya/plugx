@@ -26,17 +26,31 @@ use std::sync::OnceLock;
 static HOST: OnceLock<crate::sdk::cdylib::host::HostRef> = OnceLock::new();
 
 thread_local! {
-    /// Why the last call into this plugin returned [`Status::Error`].
-    static LAST_ERROR: RefCell<String> = const { RefCell::new(String::new()) };
+    /// Where this plugin parks the message it is handing back through an `error_out`.
+    ///
+    /// The [`Str`] written into the host's slot borrows this buffer, which the ABI documents as
+    /// valid only until the next call into this plugin — by which time the host has copied it.
+    static PLUGIN_ERROR: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
-fn set_last_error(message: impl std::fmt::Display) {
-    LAST_ERROR.with(|slot| {
+/// Park `message` where `error_out` can borrow it, and answer [`Status::Error`].
+///
+/// # Safety
+///
+/// `error_out` must be null, or a writable slot for one [`Str`] belonging to the host.
+unsafe fn fail(error_out: *mut Str, message: impl std::fmt::Display) -> Status {
+    PLUGIN_ERROR.with(|slot| {
         let mut slot = slot.borrow_mut();
         slot.clear();
         use std::fmt::Write;
         let _ = write!(slot, "{message}");
+        if !error_out.is_null() {
+            // SAFETY: checked non-null, and the caller guarantees it is writable. The borrow points
+            // at this thread's buffer, which nothing rewrites before the host has copied it out.
+            unsafe { *error_out = Str::from_str(&slot) };
+        }
     });
+    Status::Error
 }
 
 /// What one call into this plugin needs: its own context, and the host's value vtable.
@@ -105,6 +119,7 @@ unsafe fn read_config(api: &ValueApi, handle: *const ValueHandle) -> Option<Valu
 pub unsafe fn info(
     context: *const Context,
     out: *mut *mut ValueHandle,
+    error_out: *mut Str,
     plugin: fn() -> &'static dyn Plugin,
 ) -> Status {
     if out.is_null() {
@@ -118,16 +133,14 @@ pub unsafe fn info(
     let outcome = catch_unwind(AssertUnwindSafe(|| {
         let info: Info = match plugin().info(&entered.context) {
             Ok(info) => info,
-            Err(error) => {
-                set_last_error(error);
-                return Status::Error;
-            }
+            // SAFETY: `error_out` is the host's slot, forwarded under this function's contract.
+            Err(error) => return unsafe { fail(error_out, error) },
         };
         // SAFETY: `value_api` is the host's, valid for the process.
         let handle = unsafe { marshal::to_handle(entered.value_api, &info.to_value()) };
         if handle.is_null() {
-            set_last_error("the host would not allocate the info tree");
-            return Status::Error;
+            // SAFETY: see above.
+            return unsafe { fail(error_out, "the host would not allocate the info tree") };
         }
         // SAFETY: `out` was checked non-null above.
         unsafe { *out = handle };
@@ -135,10 +148,8 @@ pub unsafe fn info(
     }));
     match outcome {
         Ok(status) => status,
-        Err(_) => {
-            set_last_error("the plugin panicked while reporting its info");
-            Status::Error
-        }
+        // SAFETY: see above.
+        Err(_) => unsafe { fail(error_out, "the plugin panicked while reporting its info") },
     }
 }
 
@@ -150,6 +161,7 @@ pub unsafe fn info(
 pub unsafe fn start(
     context: *const Context,
     config: *const ValueHandle,
+    error_out: *mut Str,
     plugin: fn() -> &'static dyn Plugin,
 ) -> Status {
     // SAFETY: forwarded under this function's own contract.
@@ -161,25 +173,19 @@ pub unsafe fn start(
         // SAFETY: `config` borrows the host's tree for this call.
         let config = match unsafe { read_config(entered.value_api, config) } {
             Some(config) => config,
-            None => {
-                set_last_error("the configuration could not be read");
-                return Status::Error;
-            }
+            // SAFETY: `error_out` is the host's slot, forwarded under this function's contract.
+            None => return unsafe { fail(error_out, "the configuration could not be read") },
         };
         match plugin().start(&entered.context, &config) {
             Ok(()) => Status::Ok,
-            Err(error) => {
-                set_last_error(error);
-                Status::Error
-            }
+            // SAFETY: see above.
+            Err(error) => unsafe { fail(error_out, error) },
         }
     }));
     match outcome {
         Ok(status) => status,
-        Err(_) => {
-            set_last_error("the plugin panicked in start");
-            Status::Error
-        }
+        // SAFETY: see above.
+        Err(_) => unsafe { fail(error_out, "the plugin panicked in start") },
     }
 }
 
@@ -192,6 +198,7 @@ pub unsafe fn reload(
     context: *const Context,
     old_config: *const ValueHandle,
     new_config: *const ValueHandle,
+    error_out: *mut Str,
     plugin: fn() -> &'static dyn Plugin,
 ) -> Status {
     // SAFETY: forwarded under this function's own contract.
@@ -209,26 +216,20 @@ pub unsafe fn reload(
         };
         let (old, new) = match (old, new) {
             (Some(old), Some(new)) => (old, new),
-            _ => {
-                set_last_error("the configuration could not be read");
-                return Status::Error;
-            }
+            // SAFETY: `error_out` is the host's slot, forwarded under this function's contract.
+            _ => return unsafe { fail(error_out, "the configuration could not be read") },
         };
         match plugin().reload(&entered.context, &old, &new) {
             Ok(()) => Status::Ok,
             Err(crate::plugin::Error::Unsupported { .. }) => Status::Unsupported,
-            Err(error) => {
-                set_last_error(error);
-                Status::Error
-            }
+            // SAFETY: see above.
+            Err(error) => unsafe { fail(error_out, error) },
         }
     }));
     match outcome {
         Ok(status) => status,
-        Err(_) => {
-            set_last_error("the plugin panicked in reload");
-            Status::Error
-        }
+        // SAFETY: see above.
+        Err(_) => unsafe { fail(error_out, "the plugin panicked in reload") },
     }
 }
 
@@ -237,7 +238,11 @@ pub unsafe fn reload(
 /// # Safety
 ///
 /// `context` must be the context the host passed.
-pub unsafe fn stop(context: *const Context, plugin: fn() -> &'static dyn Plugin) -> Status {
+pub unsafe fn stop(
+    context: *const Context,
+    error_out: *mut Str,
+    plugin: fn() -> &'static dyn Plugin,
+) -> Status {
     // SAFETY: forwarded under this function's own contract.
     let entered = match unsafe { enter(context) } {
         Some(entered) => entered,
@@ -245,34 +250,12 @@ pub unsafe fn stop(context: *const Context, plugin: fn() -> &'static dyn Plugin)
     };
     let outcome = catch_unwind(AssertUnwindSafe(|| match plugin().stop(&entered.context) {
         Ok(()) => Status::Ok,
-        Err(error) => {
-            set_last_error(error);
-            Status::Error
-        }
+        // SAFETY: `error_out` is the host's slot, forwarded under this function's contract.
+        Err(error) => unsafe { fail(error_out, error) },
     }));
     match outcome {
         Ok(status) => status,
-        Err(_) => {
-            set_last_error("the plugin panicked in stop");
-            Status::Error
-        }
+        // SAFETY: see above.
+        Err(_) => unsafe { fail(error_out, "the plugin panicked in stop") },
     }
-}
-
-/// The body of [`plugx_last_error`](crate::abi::cdylib::LAST_ERROR_SYMBOL).
-///
-/// # Safety
-///
-/// `out` must be a writable location for one [`Str`].
-pub unsafe fn last_error(out: *mut Str) -> Status {
-    if out.is_null() {
-        return Status::Error;
-    }
-    LAST_ERROR.with(|slot| {
-        let slot = slot.borrow();
-        // SAFETY: `out` was checked non-null. The slice borrows this thread's error buffer, which
-        // the ABI documents as valid only until the next call into this plugin.
-        unsafe { *out = Str::from_str(&slot) };
-    });
-    Status::Ok
 }

@@ -13,7 +13,6 @@
 
 #include <ctype.h>
 #include <stdio.h>
-#include <string.h>
 
 /* What this plugin needs to call the host, copied out of the context in `plugx_start` and handed
  * back to each callback as its `user_data`. The host passes the context on every call; this is a
@@ -22,17 +21,19 @@ typedef struct HostRef {
   const PlugxHostApi *host;
   void *host_data;
   const PlugxValueApi *value;
-  PlugxStr name;
 } HostRef;
 
 static HostRef HOST;
 
-/* Why the last call into this plugin failed. Static, and so valid until the next call, which is
- * exactly what the ABI asks for. */
+/* Where this plugin parks the message it hands back through an `error_out`. Static, and so valid
+ * until the next call into us, which is exactly what the ABI asks for. */
 static char LAST_ERROR[256];
 
-static PlugxStatus fail(const char *message) {
+static PlugxStatus fail(PlugxStr *error_out, const char *message) {
   snprintf(LAST_ERROR, sizeof(LAST_ERROR), "%s", message);
+  if (error_out != NULL) {
+    *error_out = plugx_str(LAST_ERROR);
+  }
   return PLUGX_ERROR;
 }
 
@@ -58,7 +59,8 @@ static PlugxStatus on_request_headers(void *user_data, PlugxValue *data) {
     return host->host->stop_with_error(host->host_data, plugx_str("could not allocate a map"));
   }
   PlugxValue *stamped = NULL;
-  PlugxStatus status = host->host->host_call(host->host_data, plugx_str("stamp"), args, &stamped);
+  PlugxStatus status =
+      host->host->host_call(host->host_data, plugx_str("stamp"), args, &stamped, NULL);
   host->value->release(args);
   if (status != PLUGX_OK) {
     if (stamped != NULL) {
@@ -133,7 +135,7 @@ static bool usable(const PlugxContext *context) {
   return true;
 }
 
-PlugxStatus plugx_info(const PlugxContext *context, PlugxValue **out) {
+PlugxStatus plugx_info(const PlugxContext *context, PlugxValue **out, PlugxStr *error_out) {
   if (!usable(context) || out == NULL) {
     return PLUGX_INCOMPATIBLE;
   }
@@ -141,7 +143,7 @@ PlugxStatus plugx_info(const PlugxContext *context, PlugxValue **out) {
 
   PlugxValue *info = value->new_map();
   if (info == NULL) {
-    return fail("could not allocate the info map");
+    return fail(error_out, "could not allocate the info map");
   }
   value->map_set(info, plugx_str("version"), value->new_str(plugx_str("1.0.0")));
   value->map_set(info, plugx_str("description"),
@@ -150,7 +152,8 @@ PlugxStatus plugx_info(const PlugxContext *context, PlugxValue **out) {
   return PLUGX_OK;
 }
 
-PlugxStatus plugx_start(const PlugxContext *context, const PlugxValue *config) {
+PlugxStatus plugx_start(const PlugxContext *context, const PlugxValue *config,
+                        PlugxStr *error_out) {
   (void)config;
   if (!usable(context)) {
     return PLUGX_INCOMPATIBLE;
@@ -159,17 +162,19 @@ PlugxStatus plugx_start(const PlugxContext *context, const PlugxValue *config) {
   HOST.host = context->host;
   HOST.host_data = context->host_data;
   HOST.value = context->host->value;
-  HOST.name = context->plugin_name;
 
   PlugxCallback callback;
   callback.call = on_request_headers;
   callback.user_data = &HOST;
   callback.drop = NULL; /* `HOST` is static; there is nothing to free. */
 
+  /* Nothing here says "c_echo_plugin". The host knows which plugin `host_data` belongs to, so the
+   * registration is tagged with the name it loaded us under. */
   uint64_t registration = 0;
-  if (HOST.host->register_transform(HOST.host_data, HOST.name, plugx_str("request.headers"), 20,
-                                     callback, &registration) != PLUGX_OK) {
-    return fail("the host refused the callback");
+  PlugxStr refused = {NULL, 0};
+  if (HOST.host->register_transform(HOST.host_data, plugx_str("request.headers"), 20, callback,
+                                    &registration, &refused) != PLUGX_OK) {
+    return fail(error_out, "the host refused the callback");
   }
 
   PlugxApiFunction function;
@@ -178,38 +183,31 @@ PlugxStatus plugx_start(const PlugxContext *context, const PlugxValue *config) {
   function.drop = NULL;
 
   uint64_t exported = 0;
-  if (HOST.host->export_fn(HOST.host_data, HOST.name, plugx_str("shout"), function, &exported) !=
+  if (HOST.host->export_fn(HOST.host_data, plugx_str("shout"), function, &exported, &refused) !=
       PLUGX_OK) {
-    return fail("the host refused the export");
+    return fail(error_out, "the host refused the export");
   }
 
-  HOST.host->log(HOST.host_data, PLUGX_LOG_INFO, plugx_str("msg=\"Started\" plugin=c"));
+  HOST.host->log(HOST.host_data, PLUGX_LOG_INFO, plugx_str("msg=\"Started\""));
   return PLUGX_OK;
 }
 
 PlugxStatus plugx_reload(const PlugxContext *context, const PlugxValue *old_config,
-                         const PlugxValue *new_config) {
+                         const PlugxValue *new_config, PlugxStr *error_out) {
   (void)context;
   (void)old_config;
   (void)new_config;
+  (void)error_out;
   /* Nothing to reconfigure, so let the host stop and start us instead. */
   return PLUGX_UNSUPPORTED;
 }
 
-PlugxStatus plugx_stop(const PlugxContext *context) {
+PlugxStatus plugx_stop(const PlugxContext *context, PlugxStr *error_out) {
+  (void)error_out;
   if (!usable(context)) {
     return PLUGX_INCOMPATIBLE;
   }
   /* The host has already taken the callback and the function out of its registry and waited for
    * everything in flight, so there is nothing to unregister here. */
-  return PLUGX_OK;
-}
-
-PlugxStatus plugx_last_error(PlugxStr *out) {
-  if (out == NULL) {
-    return PLUGX_ERROR;
-  }
-  out->ptr = (const uint8_t *)LAST_ERROR;
-  out->len = strlen(LAST_ERROR);
   return PLUGX_OK;
 }

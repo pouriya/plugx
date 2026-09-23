@@ -800,26 +800,6 @@ impl Registry {
         *guard = Arc::new(next);
     }
 
-    /// The leaked name this host knows `plugin` by, if it knows it at all.
-    ///
-    /// A plugin's name is leaked once, when it is loaded. Everything it registers afterwards — from
-    /// inside a shared library, where the name arrives as borrowed bytes — is tagged with that same
-    /// `&'static str`, so identity stays a pointer the tables already own.
-    pub(crate) fn known_name(&self, plugin: &str) -> Option<&'static str> {
-        let guard = match self.states.read() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        let mut found = None;
-        for (name, _) in &guard.plugin_list {
-            if *name == plugin {
-                found = Some(*name);
-                break;
-            }
-        }
-        found
-    }
-
     /// Take every callback and every exported function owned by `owner` out of the tables.
     ///
     /// This is step one of the stop sequence: drain, quiesce ([`Drained::wait`]), drop, *then* stop
