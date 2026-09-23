@@ -4,7 +4,7 @@
 
 Named hooks, callbacks with priorities, plugin-to-plugin function calls, and plugins loaded from
 shared libraries — with a dependency footprint that matches what you actually are. A library that
-just wants extension points pulls in the tables and nothing else. An application that hosts plugins
+just wants extension points pulls in the registry and nothing else. An application that hosts plugins
 takes the runtime. A plugin author takes the SDK and never sees the C layer.
 
 ## Why
@@ -26,7 +26,7 @@ Code linked into your application fires hooks through one free function:
 plugx::run("request.headers", &mut data)?;
 ```
 
-It reads this program's tables out of the one slot a `Host` fills when it is built and clears when
+It reads this program's registry out of the one slot a `Host` fills when it is built and clears when
 it is dropped. That is what lets a library with extension points in it stay a library: it fires
 hooks without the application threading anything through.
 
@@ -41,7 +41,7 @@ context.plugin_call("echo::reverse", args)?;         // call another plugin's
 context.host_call("now", args)?;                     // call the application's
 ```
 
-A `Context` is 40 bytes — a name and where its tables are — `Copy` and `'static`, so nothing caches
+A `Context` is 32 bytes — a name and where its registry is — `Copy` and `'static`, so nothing caches
 one for you and a plugin can keep its copy for a background thread. A plugin `.so` links its own
 copy of plugx, so the slot inside it is empty and stays empty: `plugx::run` from in there reports
 `NoHost` rather than swallowing the call into a private table. One slot also means one live `Host`
@@ -62,24 +62,26 @@ per process — a second one is refused until the first is dropped.
   life of the process. Code reload opens a fresh copy at a new path.
 - **Nothing Rust-owned crosses the ABI.** Only pointer+length slices the receiver copies, and
   opaque handles freed by their owner. A plugin has its own allocator; the boundary respects that.
-- **Pay for what you use.** Every loader, the host, the plugin contract and the SDK are cargo
-  features, all off by default, so a library author compiles the registry alone.
+- **Pay for what you use.** Every loader, every runtime, the host, the plugin contract and the SDK
+  are cargo features, all off by default, so a library author compiles the registry alone.
 
 ## The modules
 
 | Module | Feature | Purpose |
 |--------|---------|---------|
 | `plugx::value` | — | The value carried through hooks |
-| `plugx::abi` | — | The frozen `repr(C)` host/plugin contract |
+| `plugx::abi` | — | `AbiVersion`; `abi::cdylib` is the frozen `repr(C)` host/plugin contract |
 | `plugx::context` | — | The `Context` a plugin is reached through |
-| `plugx::global` | — | This program's tables, and the free `run` that reads them |
-| `plugx::tables` | — | The four tables a host owns: hooks, plugin functions, host functions, states |
+| `plugx::registry` | — | The four tables a host owns, the one slot holding them, and the free `run` |
 | `plugx::hook` | — | Declaring hooks, and the two callback traits |
 | `plugx::error` | — | One `Error` for everything a context can fail at |
 | `plugx::plugin` | `plugin` | The `Plugin` trait, `Info`, `ConfigSpec`, `Dependency` |
-| `plugx::load` | `host` | Loaders: cdylib, wasm, starlark, js, http |
-| `plugx::host` | `host` | Discovery, dependency resolution, lifecycle |
-| `plugx::sdk` | `sdk` | Writing plugins in Rust as cdylib |
+| `plugx::plugin::load` | `host` | Where a plugin comes from: the `Loader` contract, `Artifact` |
+| `plugx::plugin::load::file` | `load-file` | The `file://` loader, and the default for a bare path |
+| `plugx::plugin::runtime` | `host` | What a plugin is run as: the `Runtime` contract |
+| `plugx::plugin::runtime::cdylib` | `runtime-cdylib` | The cdylib runtime |
+| `plugx::host` | `host` | Dependency resolution, lifecycle (discovery: `load-file`) |
+| `plugx::sdk::cdylib` | `compile-cdylib` | Writing plugins in Rust as cdylib |
 | `plugx::testing` | `testing` | Test harness for the concurrent parts |
 
 ## Using it
@@ -94,7 +96,7 @@ fn handle(headers: &mut Value) -> plugx::Result<Flow> {
 }
 ```
 
-**An application hosting plugins** — it owns the tables and fills the slot:
+**An application hosting plugins** — it owns the registry and fills the slot:
 
 ```rust
 let mut host = plugx::Host::new()?;

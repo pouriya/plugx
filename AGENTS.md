@@ -1,33 +1,41 @@
 # plugx
 
 A plugin framework: **hooks** (named extension points) dispatched to **callbacks** registered by
-**plugins** loaded from cdylib, wasm, Starlark, JS, or HTTP — plus **functions** those plugins
-export to each other and to the application.
+**plugins** — plus **functions** those plugins export to each other and to the application.
 
-Application code fires hooks with **`plugx::run`**, which reads this program's tables out of one
-global slot. Plugin code is handed a **`Context`** — a name and a pointer to the tables — on every
+Plugins come in on two independent axes, and every cargo feature names one of them: a **loader**
+fetches an artifact from somewhere (`load-file`, `load-http`), and a **runtime** runs what was
+fetched (`runtime-cdylib`, `runtime-wasm`, `runtime-starlark`, `runtime-js`). They multiply rather
+than pair: an HTTP-fetched wasm module is `load-http` + `runtime-wasm`, with nothing written for
+that combination specifically. `compile-cdylib` is the third, unrelated axis: building a plugin of
+that kind in Rust.
+
+Application code fires hooks with **`plugx::run`**, which reads this program's registry out of one
+global slot. Plugin code is handed a **`Context`** — a name and a pointer to the registry — on every
 call and reaches the host through that. Those are the only two doors, and the slot is the only
 global in the crate.
 
 ## Modules
 
-One crate, one module per stage. Everything past the tables is behind a cargo feature, all off by
+One crate, one module per stage. Everything past the registry is behind a cargo feature, all off by
 default, so a library author that only fires hooks compiles the always-on modules and nothing else.
 
 | Module | Feature | Purpose |
 |--------|---------|---------|
 | `value` | — | The dynamic value carried through hooks and calls (`Value`, `Map`, `Kind`, `Error`) |
-| `abi` | — | The frozen `repr(C)` contract between host and plugin (vtables, entry symbol, `AbiVersion`) |
+| `abi` | — | `AbiVersion`, plus one submodule per plugin kind. `abi::cdylib` is the frozen `repr(C)` contract (vtables, entry symbols) |
 | `error` | — | One `Error` for everything a `Context` can fail at |
-| `context` | — | `Context` and `Reach` — the whole plugin-author surface |
-| `global` | — | The one slot holding this program's tables, and the free `run` |
-| `tables` | — | The four tables one host owns, plus `retire` / `Retired` (`ApiFn`, `State`) |
+| `context` | — | `Context`, `HostAccess` and `HostOps` — the whole plugin-author surface, naming no plugin kind |
+| `registry` | — | `Registry`: the four tables one host owns, the one slot holding this program's, the free `run`, plus `retire` / `Retired` (`ApiFn`, `State`) |
 | `hook` | — | Declaring hooks and the two callback traits (`Hook`, `Transform`, `Observe`, `Flow`) |
-| `remote` | — | Private. The `Reach::Remote` arms: calling the host's vtable from inside a `.so` |
-| `plugin` | `plugin` | The plugin contract (`Plugin`, `Info`, `ConfigSpec`, `Dependency`) |
-| `load` | `host` | `Loader` trait and its implementations, one cargo feature each |
-| `host` | `host` | Application-side runtime: discovery, dependency resolution, lifecycle |
-| `sdk` | `sdk` | Writing plugins in Rust and building them as cdylib |
+| `plugin` | `plugin` | The plugin contract (`Plugin`, `Info`, `ConfigSpec`, `Dependency`), plus one submodule per kind |
+| `plugin::load` | `host` | Axis one, transport: the `Loader` contract, `Artifact`, `Content` |
+| `plugin::load::file` | `load-file` | The `file://` loader, and what a source with no scheme means: a path, or every file in a directory |
+| `plugin::runtime` | `host` | Axis two, format: the `Runtime` contract, plus one submodule per format |
+| `plugin::runtime::cdylib` | `runtime-cdylib` | The cdylib `Runtime`: the vtable handed out, the callbacks wrapped back |
+| `host` | `host` | Application-side runtime: dependency resolution, lifecycle. Discovery is `load-file` |
+| `sdk` | — | The plugin-author prelude |
+| `sdk::cdylib` | `compile-cdylib` | Writing a Rust plugin and building it as a `.so`: `export_plugin!` and the host vtable it calls |
 | `testing` | `testing` | Test harness: sandboxes, fixture plugins, hook assertions |
 
 ## Versioning & publishing
@@ -45,14 +53,14 @@ alternative, and never for convenience.
 These are not style preferences. Breaking one is a crash or a silent no-op in somebody else's
 process.
 
-- **One global, and it holds a pointer, not a table.** `global::TABLES` is the only `static` in
-  the crate holding state: the tables one `Host` leaked, installed when it is built and cleared
+- **One global, and it holds a pointer, not a registry.** `registry::REGISTRY` is the only `static` in
+  the crate holding state: the registry one `Host` leaked, installed when it is built and cleared
   when it is dropped. A plugin `.so` links its own copy of this crate and so gets its own copy of
   that slot, which nothing ever fills — so `run` inside a plugin returns `Error::NoHost` instead of
   swallowing the call into a private, permanently empty table. Adding a second global, or filling
   the slot from anywhere but `Host`, brings back the silent dead registry this design removed.
 - **One live `Host` per process.** `Host::new` claims the slot and fails with `Error::HostExists`
-  while another host holds it; `Drop` gives it back. The tables themselves stay leaked, because a
+  while another host holds it; `Drop` gives it back. The registry itself stays leaked, because a
   plugin may still hold the pointer.
 - **No lock is ever held while a callback or an exported function executes.** Dispatch and
   `plugin_call` snapshot the table (brief read lock), release, *then* invoke. Holding across
@@ -72,21 +80,28 @@ process.
   host's `abi::Context`; the SDK turns it into a `Context` for the length of that call and drops
   it. There is no entry point, no vtable coming back, no instance pointer and no install step — a
   plugin that wants one on a background thread keeps its own copy.
-- **A plugin's name is its identity, and its filename is its name.** `libauth.so` loads as `auth`,
+- **A plugin's name is its identity, and its filename is its name.** The *runtime* parses it, by
+  its own format's rules, because the extension is what chose that runtime: `libauth.so` is `auth`,
   leaked once at load, compared as a `&'static str`, unique per host. Registrations are tagged with
   it and `plugin::function` addresses through it. One library is one plugin.
+- **A runtime stamps the name into `Info::name`, and that is how a host learns it.** `build` hands
+  back plugins and nothing else; the host asks each one for its `Info` through a context named `""`,
+  because the name is what it is asking for. A runtime that forgets to stamp produces plugins the
+  host refuses as unnamed.
 - **A plugin exports one symbol per operation.** `plugx_abi_version`, `plugx_info`, `plugx_start`,
   `plugx_reload`, `plugx_stop`, `plugx_last_error`. The host resolves them by name after the
   version check. Adding an operation appends a symbol; a host treats a missing one as unsupported.
 
 ## `unsafe`
 
-Confined to the modules that touch the C boundary — `abi`, `load`, `sdk` — and to **one module**
-outside them: `remote`, which calls the host's function pointers from inside a loaded library. Its
-whole unsafe surface rests on a single contract, established once by `Remote::new` (an `unsafe fn`):
-the vtable is valid and outlives the process.
+Confined to the modules that touch a plugin boundary: `abi::cdylib`, `plugin::runtime::cdylib` and
+`sdk::cdylib`. Inside the last of those, `sdk::cdylib::host` calls the host's function pointers
+from inside a loaded library; its whole unsafe surface rests on a single contract, established
+once by `HostRef::new` (an `unsafe fn`): the vtable is valid and outlives the process.
 
-`value`, `error`, `context`, `tables`, `hook`, `plugin` and `host` must contain no `unsafe`. This
+`value`, `error`, `context`, `hook`, `plugin` (its own files) and `host` must contain no `unsafe`. So must
+`registry`, with one exception written into it: dereferencing the slot in `run`, whose invariant is
+that the only non-null value the slot ever holds is a leaked `&'static Registry`. This
 used to be `#![forbid(unsafe_code)]` on the crates that became those modules; a single crate cannot
 forbid per-module, so it is now a review rule rather than a compiler-enforced one. An `unsafe` block
 appearing in one of them is a defect.
@@ -106,7 +121,7 @@ approximation.
 
 `tests/abi.rs` compiles `examples/c_echo_plugin.c` against `include/plugx.h` with the system C
 compiler and drives it through the ordinary host API. The header is part of the ABI contract:
-change a `repr(C)` struct in `src/abi` and it changes too, or the test stops meaning anything.
+change a `repr(C)` struct in `src/abi/cdylib` and it changes too, or the test stops meaning anything.
 
 Until the rest of the written tests land, `make examples && ./bin/demo bin` is the end-to-end
 check: it scans a
@@ -116,6 +131,21 @@ once the host is dropped.
 
 ## Code style conventions
 
+- **A list is named `_list`; a map is named with a plural.** The suffix says which of the two a
+  name holds, so that a reader knows the shape without going to look:
+  - **`Vec`, slice, array, iterator → `<thing>_list`.** `artifact_list`, `plugin_list`,
+    `entry_list`, `schema_list`, `extension_list`, `dependency_list` — **never** `artifacts`,
+    `plugins`, `entries`, `dependencies`. A trailing `s` is one character from the singular and
+    gets read as the singular; `_list` never does.
+  - **Map, table, anything keyed → the plural.** `hooks`, `apis`, `states`: a keyed collection is
+    addressed one key at a time, so the plural is what it reads as at the use site.
+  - A name holding **one** struct takes neither, even when that struct contains a collection:
+    `symbols` is a record of five function pointers, not five of anything.
+  - **The one exception is `bytes`**, along with std's `as_bytes` / `to_bytes` family: binary data
+    is a mass noun, not a list of `u8` values, and std has already settled its spelling.
+
+  This is not per-module. A `Vec` under a plural name is a defect in `src/`, `tests/`, `examples/`
+  and the C header alike.
 - **Plain `for` loops over iterator method chains.** Prefer a `for` loop to
   `.map`/`.filter`/`.fold`/`.collect` chains. (When you do index a slice, still use `for x in &xs` /
   `.iter().enumerate()` to satisfy `needless_range_loop`.)
