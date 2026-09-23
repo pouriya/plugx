@@ -1,6 +1,6 @@
-use std::fmt::{Display, Formatter, Result as FmtResult};
+use crate::abi::cdylib::AbiVersion;
 
-/// The ABI this build of the crate speaks.
+/// The C ABI this build of the crate speaks.
 ///
 /// A plugin reports the version it was compiled against; a host refuses to load a plugin whose
 /// [`AbiVersion::major`] differs from its own.
@@ -9,32 +9,6 @@ pub const ABI_VERSION: AbiVersion = AbiVersion {
     minor: 0,
     patch: 0,
 };
-
-/// A three-part version, laid out for the wire.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct AbiVersion {
-    /// Incompatible change. A host loads a plugin only when this matches exactly.
-    pub major: u32,
-    /// Backwards-compatible addition (an appended vtable field, a new [`crate::abi::value::ValueApi`]
-    /// entry). A host may load a plugin built against a lower minor than its own.
-    pub minor: u32,
-    /// A fix with no signature change.
-    pub patch: u32,
-}
-
-impl AbiVersion {
-    /// Whether a plugin built against `self` can be loaded by a host speaking `host`.
-    pub const fn compatible_with(self, host: Self) -> bool {
-        self.major == host.major && self.minor <= host.minor
-    }
-}
-
-impl Display for AbiVersion {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
-        write!(formatter, "{}.{}.{}", self.major, self.minor, self.patch)
-    }
-}
 
 /// A borrowed run of bytes, almost always UTF-8.
 ///
@@ -68,7 +42,7 @@ impl Slice {
     /// Borrow the bytes as a `&'static str`, or `None` if they are not UTF-8.
     ///
     /// Copies nothing. Only sound for a slice the other side documents as living for the whole
-    /// process — [`plugin_name`](crate::abi::Context::plugin_name) is the one such slice in this
+    /// process — [`plugin_name`](crate::abi::cdylib::Context::plugin_name) is the one such slice in this
     /// ABI, because the host leaks the name it loaded a plugin under.
     ///
     /// # Safety

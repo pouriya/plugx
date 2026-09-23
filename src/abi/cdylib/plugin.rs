@@ -1,6 +1,7 @@
-use crate::abi::context::Context;
-use crate::abi::primitive::{AbiVersion, Slice, Status};
-use crate::abi::value::ValueHandle;
+use crate::abi::AbiVersion;
+use crate::abi::cdylib::context::Context;
+use crate::abi::cdylib::primitive::{Slice, Status};
+use crate::abi::cdylib::value::ValueHandle;
 
 /// The symbol a plugin exports to report the ABI it was built against, as a NUL-terminated name.
 ///
@@ -30,7 +31,7 @@ pub type VersionFn = unsafe extern "C" fn() -> AbiVersion;
 /// The signature of [`INFO_SYMBOL`].
 ///
 /// Reports the plugin's version, description, configuration spec and dependencies as a value tree.
-/// The tree is allocated with the host's own [`ValueApi`](crate::abi::ValueApi), so ownership of
+/// The tree is allocated with the host's own [`ValueApi`](crate::abi::cdylib::ValueApi), so ownership of
 /// the handle written to `out` passes to the host, which releases it.
 pub type InfoFn =
     unsafe extern "C" fn(context: *const Context, out: *mut *mut ValueHandle) -> Status;

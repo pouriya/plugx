@@ -15,17 +15,17 @@
 #include <stdio.h>
 #include <string.h>
 
-/* What this plugin needs to reach the host, copied out of the context in `plugx_start` and handed
+/* What this plugin needs to call the host, copied out of the context in `plugx_start` and handed
  * back to each callback as its `user_data`. The host passes the context on every call; this is a
  * copy kept only because a callback is invoked later, out of any call of ours. */
-typedef struct Reach {
+typedef struct HostRef {
   const PlugxHostApi *host;
   void *host_data;
   const PlugxValueApi *value;
   PlugxSlice name;
-} Reach;
+} HostRef;
 
-static Reach REACH;
+static HostRef HOST;
 
 /* Why the last call into this plugin failed. Static, and so valid until the next call, which is
  * exactly what the ABI asks for. */
@@ -41,32 +41,32 @@ static PlugxStatus fail(const char *message) {
  * Runs on every `request.headers` dispatch, stamps the payload, and calls the application's own
  * `stamp` function while the dispatch is still in flight. */
 static PlugxStatus on_request_headers(void *user_data, PlugxValue *data) {
-  Reach *reach = (Reach *)user_data;
-  if (reach->value->kind(data) != PLUGX_KIND_MAP) {
+  HostRef *host = (HostRef *)user_data;
+  if (host->value->kind(data) != PLUGX_KIND_MAP) {
     return PLUGX_OK;
   }
 
-  PlugxValue *seen = reach->value->new_str(plugx_str("c_echo_plugin"));
+  PlugxValue *seen = host->value->new_str(plugx_str("c_echo_plugin"));
   if (seen == NULL) {
     return PLUGX_ERROR;
   }
   /* `map_set` takes ownership, so `seen` must not be released here. */
-  reach->value->map_set(data, plugx_str("seen-by-c"), seen);
+  host->value->map_set(data, plugx_str("seen-by-c"), seen);
 
-  PlugxValue *args = reach->value->new_map();
+  PlugxValue *args = host->value->new_map();
   if (args == NULL) {
     return PLUGX_ERROR;
   }
   PlugxValue *stamped = NULL;
-  PlugxStatus status = reach->host->host_call(reach->host_data, plugx_str("stamp"), args, &stamped);
-  reach->value->release(args);
+  PlugxStatus status = host->host->host_call(host->host_data, plugx_str("stamp"), args, &stamped);
+  host->value->release(args);
   if (status != PLUGX_OK) {
     if (stamped != NULL) {
-      reach->value->release(stamped);
+      host->value->release(stamped);
     }
     return PLUGX_ERROR;
   }
-  reach->value->map_set(data, plugx_str("c-stamp"), stamped);
+  host->value->map_set(data, plugx_str("c-stamp"), stamped);
 
   return PLUGX_OK;
 }
@@ -76,13 +76,13 @@ static PlugxStatus on_request_headers(void *user_data, PlugxValue *data) {
  * `c_echo_plugin::shout` — uppercase a string. Anyone can call it: the application, another
  * plugin, or a callback in the middle of a dispatch. */
 static PlugxStatus shout(void *user_data, const PlugxValue *args, PlugxValue **out) {
-  Reach *reach = (Reach *)user_data;
+  HostRef *host = (HostRef *)user_data;
 
   PlugxSlice text;
-  if (reach->value->kind(args) != PLUGX_KIND_STR ||
-      reach->value->get_str(args, &text) != PLUGX_OK) {
+  if (host->value->kind(args) != PLUGX_KIND_STR ||
+      host->value->get_str(args, &text) != PLUGX_OK) {
     /* A plugin's own failure crosses as a free-form value, written to `out`. */
-    *out = reach->value->new_str(plugx_str("shout wants a string"));
+    *out = host->value->new_str(plugx_str("shout wants a string"));
     return PLUGX_ERROR;
   }
 
@@ -96,7 +96,7 @@ static PlugxStatus shout(void *user_data, const PlugxValue *args, PlugxValue **o
   PlugxSlice shouted;
   shouted.ptr = (const uint8_t *)buffer;
   shouted.len = len;
-  *out = reach->value->new_str(shouted);
+  *out = host->value->new_str(shouted);
   if (*out == NULL) {
     return PLUGX_ERROR;
   }
@@ -154,34 +154,34 @@ PlugxStatus plugx_start(const PlugxContext *context, const PlugxValue *config) {
     return PLUGX_INCOMPATIBLE;
   }
 
-  REACH.host = context->host;
-  REACH.host_data = context->host_data;
-  REACH.value = context->host->value;
-  REACH.name = context->plugin_name;
+  HOST.host = context->host;
+  HOST.host_data = context->host_data;
+  HOST.value = context->host->value;
+  HOST.name = context->plugin_name;
 
   PlugxCallback callback;
   callback.call = on_request_headers;
-  callback.user_data = &REACH;
-  callback.drop = NULL; /* `REACH` is static; there is nothing to free. */
+  callback.user_data = &HOST;
+  callback.drop = NULL; /* `HOST` is static; there is nothing to free. */
 
   uint64_t registration = 0;
-  if (REACH.host->register_transform(REACH.host_data, REACH.name, plugx_str("request.headers"), 20,
+  if (HOST.host->register_transform(HOST.host_data, HOST.name, plugx_str("request.headers"), 20,
                                      callback, &registration) != PLUGX_OK) {
     return fail("the host refused the callback");
   }
 
   PlugxApiFunction function;
   function.call = shout;
-  function.user_data = &REACH;
+  function.user_data = &HOST;
   function.drop = NULL;
 
   uint64_t exported = 0;
-  if (REACH.host->export_fn(REACH.host_data, REACH.name, plugx_str("shout"), function, &exported) !=
+  if (HOST.host->export_fn(HOST.host_data, HOST.name, plugx_str("shout"), function, &exported) !=
       PLUGX_OK) {
     return fail("the host refused the export");
   }
 
-  REACH.host->log(REACH.host_data, PLUGX_LOG_INFO, plugx_str("msg=\"Started\" plugin=c"));
+  HOST.host->log(HOST.host_data, PLUGX_LOG_INFO, plugx_str("msg=\"Started\" plugin=c"));
   return PLUGX_OK;
 }
 
@@ -198,7 +198,7 @@ PlugxStatus plugx_stop(const PlugxContext *context) {
   if (!usable(context)) {
     return PLUGX_INCOMPATIBLE;
   }
-  /* The host has already taken the callback and the function out of its tables and waited for
+  /* The host has already taken the callback and the function out of its registry and waited for
    * everything in flight, so there is nothing to unregister here. */
   return PLUGX_OK;
 }

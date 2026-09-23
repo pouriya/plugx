@@ -1,5 +1,5 @@
-use crate::abi::primitive::{Slice, Status};
-use crate::abi::value::{ValueApi, ValueHandle};
+use crate::abi::cdylib::primitive::{Slice, Status};
+use crate::abi::cdylib::value::{ValueApi, ValueHandle};
 use crate::value::{Kind, Map, Value};
 
 /// Build a host-owned value tree from a Rust [`Value`], returning an owned handle.
@@ -19,12 +19,12 @@ pub unsafe fn to_handle(api: &ValueApi, value: &Value) -> *mut ValueHandle {
             Value::Int(inner) => (api.new_int)(*inner),
             Value::Float(inner) => (api.new_float)(*inner),
             Value::Str(inner) => (api.new_str)(Slice::from_str(inner)),
-            Value::List(items) => {
+            Value::List(item_list) => {
                 let handle = (api.new_list)();
                 if handle.is_null() {
                     return handle;
                 }
-                for item in items {
+                for item in item_list {
                     let child = to_handle(api, item);
                     if child.is_null() {
                         (api.release)(handle);
@@ -38,12 +38,12 @@ pub unsafe fn to_handle(api: &ValueApi, value: &Value) -> *mut ValueHandle {
                 }
                 handle
             }
-            Value::Map(entries) => {
+            Value::Map(map) => {
                 let handle = (api.new_map)();
                 if handle.is_null() {
                     return handle;
                 }
-                for (key, item) in entries.iter() {
+                for (key, item) in map.iter() {
                     let child = to_handle(api, item);
                     if child.is_null() {
                         (api.release)(handle);
@@ -115,22 +115,22 @@ pub unsafe fn from_handle(api: &ValueApi, handle: *const ValueHandle) -> Option<
                 if (api.list_len)(handle, &mut len) != Status::Ok {
                     return None;
                 }
-                let mut items = Vec::with_capacity(len);
+                let mut item_list = Vec::with_capacity(len);
                 for index in 0..len {
                     let child = (api.list_get)(handle.cast_mut(), index);
                     match from_handle(api, child) {
-                        Some(item) => items.push(item),
+                        Some(item) => item_list.push(item),
                         None => return None,
                     }
                 }
-                Some(Value::List(items))
+                Some(Value::List(item_list))
             }
             Kind::Map => {
                 let mut len = 0usize;
                 if (api.map_len)(handle, &mut len) != Status::Ok {
                     return None;
                 }
-                let mut entries = Map::with_capacity(len);
+                let mut map = Map::with_capacity(len);
                 for index in 0..len {
                     let mut key = Slice::EMPTY;
                     if (api.map_key_at)(handle, index, &mut key) != Status::Ok {
@@ -140,12 +140,12 @@ pub unsafe fn from_handle(api: &ValueApi, handle: *const ValueHandle) -> Option<
                     let child = (api.map_get)(handle.cast_mut(), key);
                     match from_handle(api, child) {
                         Some(item) => {
-                            entries.insert(name, item);
+                            map.insert(name, item);
                         }
                         None => return None,
                     }
                 }
-                Some(Value::Map(entries))
+                Some(Value::Map(map))
             }
         }
     }
@@ -173,12 +173,12 @@ pub unsafe fn write_back(api: &ValueApi, handle: *mut ValueHandle, value: &Value
             Value::Int(inner) => (api.set_int)(handle, *inner),
             Value::Float(inner) => (api.set_float)(handle, *inner),
             Value::Str(inner) => (api.set_str)(handle, Slice::from_str(inner)),
-            Value::List(items) => {
+            Value::List(item_list) => {
                 let status = (api.set_list)(handle);
                 if status != Status::Ok {
                     return status;
                 }
-                for item in items {
+                for item in item_list {
                     let child = to_handle(api, item);
                     if child.is_null() {
                         return Status::Error;
@@ -190,12 +190,12 @@ pub unsafe fn write_back(api: &ValueApi, handle: *mut ValueHandle, value: &Value
                 }
                 Status::Ok
             }
-            Value::Map(entries) => {
+            Value::Map(map) => {
                 let status = (api.set_map)(handle);
                 if status != Status::Ok {
                     return status;
                 }
-                for (key, item) in entries.iter() {
+                for (key, item) in map.iter() {
                     let child = to_handle(api, item);
                     if child.is_null() {
                         return Status::Error;

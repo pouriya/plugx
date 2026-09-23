@@ -151,7 +151,7 @@ typedef struct PlugxApiFunction {
 /* ---- what the host offers ----------------------------------------------------------------- */
 
 /* Every entry takes `host_data` first: the opaque pointer from the context, which is how the host
- * finds its own tables. Registration entries take the plugin's own name as `owner` — the name is
+ * finds its own registry. Registration entries take the plugin's own name as `owner` — the name is
  * the identity in this ABI, and there is no separate id. */
 typedef struct PlugxHostApi {
   size_t size;
@@ -206,7 +206,7 @@ PlugxStatus plugx_start(const PlugxContext *context, const PlugxValue *config);
 PlugxStatus plugx_reload(const PlugxContext *context, const PlugxValue *old_config,
                          const PlugxValue *new_config);
 
-/* Tear down. Everything you registered is already out of the host's tables and quiesced. */
+/* Tear down. Everything you registered is already out of the host's registry and quiesced. */
 PlugxStatus plugx_stop(const PlugxContext *context);
 
 /* Why the last call into this plugin failed. The slice must stay valid until the next call. */

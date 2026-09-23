@@ -1,4 +1,4 @@
-use crate::abi::primitive::{Slice, Status};
+use crate::abi::cdylib::primitive::{Slice, Status};
 use std::marker::PhantomData;
 use std::marker::PhantomPinned;
 

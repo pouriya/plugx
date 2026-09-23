@@ -1,6 +1,7 @@
-use crate::abi::callback::{ApiFunction, Callback};
-use crate::abi::primitive::{AbiVersion, Slice, Status};
-use crate::abi::value::{ValueApi, ValueHandle};
+use crate::abi::AbiVersion;
+use crate::abi::cdylib::callback::{ApiFunction, Callback};
+use crate::abi::cdylib::primitive::{Slice, Status};
+use crate::abi::cdylib::value::{ValueApi, ValueHandle};
 use std::ffi::c_void;
 
 /// Everything a plugin can ask of its host, as function pointers.
@@ -8,7 +9,7 @@ use std::ffi::c_void;
 /// Grows by appending; `size` says how much of it the host actually wrote.
 ///
 /// Every entry takes `host_data` as its first argument — the same opaque pointer the host put in
-/// [`Context::host_data`], which is how it finds its tables. The vtable itself is shared and
+/// [`Context::host_data`], which is how it finds its registry. The vtable itself is shared and
 /// stateless; this pointer is what carries the host.
 ///
 /// Registration entries take the plugin's own name as `owner`. The name is the identity in this

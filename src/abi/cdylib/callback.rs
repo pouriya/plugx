@@ -1,5 +1,5 @@
-use crate::abi::primitive::Status;
-use crate::abi::value::ValueHandle;
+use crate::abi::cdylib::primitive::Status;
+use crate::abi::cdylib::value::ValueHandle;
 use std::ffi::c_void;
 
 /// A plugin's hook callback, as the host stores it.
