@@ -1,12 +1,12 @@
 //! The handle everything else is reached through.
 //!
-//! A `Context` is 32 bytes: a name and a [`HostAccess`]. The name is the identity — what the owner
-//! is called, what logs print, and what everything it registers is tagged with. The access is where
+//! A `Context` is 32 bytes: a name and a [`HostAccess`]. The name is the identity — what the caller
+//! is called, what logs print, and the namespace everything it registers is filed under. The access is where
 //! its registry is: pointed straight at it when the code is linked into the host, or at a
 //! [`HostOps`] that leads back to them when the code runs outside the host's binary.
 //!
 //! Nobody stores one. It is `Copy`, `'static` and cheap enough to rebuild on the spot — the host
-//! builds one per lifecycle call, and a dispatch builds one per callback out of the entry's owner
+//! builds one per lifecycle call, and a dispatch builds one per callback out of the entry's namespace
 //! and the runner's own access. A plugin that needs one on a background thread just keeps its copy.
 //!
 //! Code linked into the application can skip all this and use [`run`](crate::run), which reads the
@@ -32,7 +32,7 @@ use std::sync::Arc;
 pub(crate) trait HostOps: Send + Sync {
     /// Fire `hook` in the host, and take back whatever its callbacks did to the payload.
     fn run(&self, hook: &str, data: &mut Value) -> Result<()>;
-    /// File a transform callback in the host's registry under `context`'s name.
+    /// File a transform callback in the host's registry under `context`'s namespace.
     fn register_transform(
         &self,
         context: Context,
@@ -40,7 +40,7 @@ pub(crate) trait HostOps: Send + Sync {
         priority: i32,
         callback: Arc<dyn Transform>,
     ) -> Result<RegistrationId>;
-    /// File an observe callback in the host's registry under `context`'s name.
+    /// File an observe callback in the host's registry under `context`'s namespace.
     fn register_observe(
         &self,
         context: Context,
@@ -50,7 +50,7 @@ pub(crate) trait HostOps: Send + Sync {
     ) -> Result<RegistrationId>;
     /// Withdraw one of this plugin's registrations. Whether it was there.
     fn unregister(&self, registration: RegistrationId) -> bool;
-    /// Publish a function under `context`'s name.
+    /// Publish a function in `context`'s namespace.
     fn export(
         &self,
         context: Context,
@@ -81,7 +81,7 @@ pub(crate) enum HostAccess {
 
 /// What a plugin is handed on every lifecycle call, and every callback on every dispatch.
 ///
-/// Through it an owner can register and remove hook callbacks, export and withdraw its own
+/// Through it a plugin can register and remove hook callbacks, export and withdraw its own
 /// functions, call another plugin's functions, call the application's functions, and fire hooks.
 /// The same nine methods do the same nine things whether the code is statically linked into the
 /// host or loaded from a shared library.
@@ -128,8 +128,8 @@ impl Context {
         Self { name, access }
     }
 
-    /// The name the host knows this owner by. Identity, not decoration: registrations, exports and
-    /// `plugin::function` addressing all key off it.
+    /// The name the host knows this plugin by. Identity, not decoration: it is the namespace its
+    /// registrations and exports are filed under, and what `plugin::function` addresses through.
     pub const fn name(&self) -> &str {
         self.name
     }
@@ -156,8 +156,8 @@ impl Context {
 
     /// Register a callback that may rewrite a hook's payload.
     ///
-    /// Lower `priority` runs earlier; ties run in registration order. The registration is tagged
-    /// with this context's name, so the host removes it when the owner stops — a plugin does not
+    /// Lower `priority` runs earlier; ties run in registration order. The registration is filed
+    /// under this context's name, so the host removes it when that plugin stops — a plugin does not
     /// have to unregister in its own `stop`.
     pub fn on_transform<'a>(
         &self,
@@ -202,7 +202,7 @@ impl Context {
         }
     }
 
-    /// Remove one of this owner's hook registrations early. Returns whether it was there.
+    /// Remove one of this namespace's hook registrations early. Returns whether it was there.
     pub fn unregister(&self, registration: RegistrationId) -> bool {
         match self.access {
             HostAccess::Direct(registry) => registry.unregister(self.name, registration),
@@ -210,9 +210,9 @@ impl Context {
         }
     }
 
-    /// Publish a function under this owner's name, callable by anyone as `name::function`.
+    /// Publish a function in this context's namespace, callable by anyone as `namespace::function`.
     ///
-    /// May be called at any time, including from inside a callback. Exporting a name this owner
+    /// May be called at any time, including from inside a callback. Exporting a name this namespace
     /// already has live is [`Error::Duplicate`](crate::Error::Duplicate); withdraw the old one
     /// first with [`unexport`](Self::unexport).
     pub fn export(&self, name: &str, function: impl ApiFn + 'static) -> Result<RegistrationId> {
@@ -223,7 +223,7 @@ impl Context {
         }
     }
 
-    /// Withdraw one of this owner's functions. Returns whether it was there.
+    /// Withdraw one of this namespace's functions. Returns whether it was there.
     pub fn unexport(&self, registration: RegistrationId) -> bool {
         match self.access {
             HostAccess::Direct(registry) => registry.unexport(self.name, registration),

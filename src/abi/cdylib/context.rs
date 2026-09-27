@@ -12,7 +12,7 @@ use std::ffi::c_void;
 /// [`Context::host_data`]. The vtable itself is shared and stateless; this pointer is what carries
 /// the host, and it is **per plugin**: one host hands a different one to each library it loads.
 ///
-/// That is why nothing here names an owner. A registration is tagged with whoever `host_data` says
+/// That is why nothing here names a namespace. A registration is filed under whoever `host_data` says
 /// is calling, which the plugin cannot spell wrong and cannot spell as somebody else. The name is
 /// still the identity in this ABI and there is still no separate id — the plugin just does not
 /// have to repeat it.
@@ -148,11 +148,11 @@ pub struct Context {
     /// Passed back as the first argument of every [`HostApi`] call. Opaque to the plugin.
     ///
     /// One per loaded plugin, not one per host: it is how the host knows *which* plugin is calling
-    /// as well as which host is being called, so nothing a plugin registers has to name its owner.
+    /// as well as which host is being called, so nothing a plugin registers has to name a namespace.
     pub host_data: *mut c_void,
 
     /// The name the host knows this plugin by. It is the plugin's identity: everything it
-    /// registers is tagged with it, and other plugins address its functions through it. Valid for
+    /// registers is filed under it, and other plugins address its functions through it. Valid for
     /// the life of the process.
     pub plugin_name: Str,
 }

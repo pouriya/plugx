@@ -34,7 +34,7 @@ pub enum Error {
     },
     /// A stop gave up waiting for in-flight dispatches.
     ///
-    /// The owner's callbacks and functions are already out of the registry, so it can receive
+    /// The plugin's callbacks and functions are already out of the registry, so it can receive
     /// nothing new, but at least one call was still running when the deadline passed. Nothing was
     /// dropped and the plugin was not stopped; retry.
     StopTimeout {
@@ -72,10 +72,10 @@ pub enum Error {
         /// The function that was asked for.
         function: Box<str>,
     },
-    /// A live function of that name is already exported under this name.
+    /// A live function of that name is already exported in this namespace.
     Duplicate {
-        /// Whose table it is.
-        plugin: Box<str>,
+        /// The namespace it is already taken in.
+        namespace: Box<str>,
         /// The name that was already taken.
         function: Box<str>,
     },
@@ -123,9 +123,12 @@ impl Display for Error {
             Self::NoSuchFunction { plugin, function } => {
                 write!(formatter, "plugin `{plugin}` exports no `{function}`")
             }
-            Self::Duplicate { plugin, function } => write!(
+            Self::Duplicate {
+                namespace,
+                function,
+            } => write!(
                 formatter,
-                "`{plugin}` already exports a live function called `{function}`"
+                "`{namespace}` already exports a live function called `{function}`"
             ),
             Self::Failed { plugin, error } => {
                 write!(formatter, "`{plugin}` failed with a {} value", error.kind())

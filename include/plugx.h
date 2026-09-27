@@ -174,8 +174,8 @@ typedef struct PlugxApiFunction {
 
 /* Every entry takes `host_data` first: the opaque pointer from the context. It is per *plugin*, not
  * per host — a host hands a different one to each library it loads — so the host already knows who
- * is calling. That is why nothing here names an owner: your registrations are tagged with the name
- * the host loaded you under, which you cannot spell wrong and cannot spell as somebody else.
+ * is calling. That is why nothing here names a namespace: your registrations are filed under the
+ * name the host loaded you under, which you cannot spell wrong and cannot spell as somebody else.
  *
  * Every entry that can fail also takes an `error_out` last, and writes a message into it before
  * returning anything but PLUGX_OK. Copy it immediately; it borrows a buffer the host reuses on your

@@ -166,14 +166,14 @@ impl Runtime for Cdylib {
             });
         }
 
-        // Leaked once, here. Everything this plugin registers is tagged with this exact `&'static
+        // Leaked once, here. Everything this plugin registers is filed under this exact `&'static
         // str`, so identity is a pointer the registry already owns rather than a string compared
         // over and over — and a plugin running inside a shared library can hold on to it for good.
         let name: &'static str = Box::leak(name.to_string().into_boxed_str());
 
         // The plugin is handed this on every call, and the ABI lets it borrow the pieces for the
         // life of the process, so it is leaked. `host_data` is this plugin's own record — the
-        // registry it registers into, and the name everything it registers is tagged with. One
+        // registry it registers into, and the namespace everything it registers lands in. One
         // per plugin, which is how the host answers "who is calling" without asking.
         let data: &'static PluginData = Box::leak(Box::new(PluginData::new(registry, name)));
         let host_data = std::ptr::from_ref(data).cast::<c_void>().cast_mut();

@@ -10,7 +10,7 @@
 //! | Table | Key | Holds |
 //! |-------|-----|-------|
 //! | hooks | hook name | every callback registered for it, in priority order |
-//! | apis | plugin name, then function name | that plugin's exported functions |
+//! | apis | namespace, then function name | the functions exported under it |
 //! | hosts | function name | the application's own functions, flat, no prefix |
 //! | states | plugin name | where the plugin is in its lifecycle |
 //!
@@ -93,7 +93,7 @@ impl CallbackKind {
 #[derive(Clone)]
 struct Entry {
     id: u64,
-    owner: &'static str,
+    namespace: &'static str,
     priority: i32,
     callback: CallbackKind,
 }
@@ -221,14 +221,14 @@ impl HookTable {
 #[derive(Clone)]
 struct ApiEntry {
     id: u64,
-    owner: &'static str,
+    namespace: &'static str,
     name: String,
     function: Arc<dyn ApiFn>,
 }
 
 /// Every function one plugin exports.
 #[derive(Clone)]
-struct ApiOwner {
+struct ApiNamespace {
     name: &'static str,
     function_list: Vec<ApiEntry>,
 }
@@ -236,24 +236,24 @@ struct ApiOwner {
 /// The plugin function table, as one immutable snapshot.
 #[derive(Clone)]
 struct ApiTable {
-    /// Sorted by owner name, so a lookup is a binary search.
-    owner_list: Vec<ApiOwner>,
+    /// Sorted by namespace, so a lookup is a binary search.
+    namespace_list: Vec<ApiNamespace>,
 }
 
 impl ApiTable {
     const fn new() -> Self {
         Self {
-            owner_list: Vec::new(),
+            namespace_list: Vec::new(),
         }
     }
 
-    /// Whether `owner` already exports a live function called `name`.
-    fn contains(&self, owner: &str, name: &str) -> bool {
+    /// Whether `namespace` already exports a live function called `name`.
+    fn contains(&self, namespace: &str, name: &str) -> bool {
         if let Ok(index) = self
-            .owner_list
-            .binary_search_by(|slot| slot.name.cmp(owner))
+            .namespace_list
+            .binary_search_by(|slot| slot.name.cmp(namespace))
         {
-            for entry in &self.owner_list[index].function_list {
+            for entry in &self.namespace_list[index].function_list {
                 if entry.name == name {
                     return true;
                 }
@@ -264,28 +264,28 @@ impl ApiTable {
 
     fn insert(&mut self, entry: ApiEntry) {
         let index = match self
-            .owner_list
-            .binary_search_by(|slot| slot.name.cmp(entry.owner))
+            .namespace_list
+            .binary_search_by(|slot| slot.name.cmp(entry.namespace))
         {
             Ok(index) => index,
             Err(index) => {
-                self.owner_list.insert(
+                self.namespace_list.insert(
                     index,
-                    ApiOwner {
-                        name: entry.owner,
+                    ApiNamespace {
+                        name: entry.namespace,
                         function_list: Vec::new(),
                     },
                 );
                 index
             }
         };
-        self.owner_list[index].function_list.push(entry);
+        self.namespace_list[index].function_list.push(entry);
     }
 
-    /// Remove every function `predicate` accepts, dropping any owner left with none.
+    /// Remove every function `predicate` accepts, dropping any namespace left with none.
     fn take_matching(&mut self, predicate: impl Fn(&ApiEntry) -> bool) -> Vec<ApiEntry> {
         let mut removed_list = Vec::new();
-        for slot in &mut self.owner_list {
+        for slot in &mut self.namespace_list {
             let mut kept_list = Vec::with_capacity(slot.function_list.len());
             for entry in slot.function_list.drain(..) {
                 if predicate(&entry) {
@@ -296,7 +296,7 @@ impl ApiTable {
             }
             slot.function_list = kept_list;
         }
-        self.owner_list
+        self.namespace_list
             .retain(|slot| !slot.function_list.is_empty());
         removed_list
     }
@@ -388,10 +388,10 @@ impl Registry {
 
     // ---- hooks ----------------------------------------------------------------------------
 
-    /// Add a callback, tagged with `owner`.
+    /// Add a callback, tagged with `namespace`.
     pub(crate) fn register(
         &self,
-        owner: &'static str,
+        namespace: &'static str,
         hook: &str,
         priority: i32,
         callback: CallbackKind,
@@ -405,7 +405,7 @@ impl Registry {
                 hook,
                 Entry {
                     id,
-                    owner,
+                    namespace,
                     priority,
                     callback,
                 },
@@ -421,13 +421,13 @@ impl Registry {
                     hook = hook,
                     kind = label,
                     priority = priority,
-                    plugin = owner,
+                    plugin = namespace,
                     registration = id
                 );
             } else if #[cfg(feature = "logging")] {
                 log::debug!(
                     "msg=\"Registered callback\" hook={hook} kind={label} priority={priority} \
-                     plugin={owner} registration={id}"
+                     plugin={namespace} registration={id}"
                 );
             } else {
                 let _ = label;
@@ -436,13 +436,14 @@ impl Registry {
         RegistrationId::new(id)
     }
 
-    /// Remove one registration owned by `owner`. Returns whether anything matched.
-    pub(crate) fn unregister(&self, owner: &str, registration: RegistrationId) -> bool {
+    /// Remove one of `namespace`'s registrations. Returns whether anything matched.
+    pub(crate) fn unregister(&self, namespace: &str, registration: RegistrationId) -> bool {
         {
             let mut guard = self.write_hooks();
             let mut next = (**guard).clone();
-            let removed_list =
-                next.take_matching(|entry| entry.owner == owner && entry.id == registration.get());
+            let removed_list = next.take_matching(|entry| {
+                entry.namespace == namespace && entry.id == registration.get()
+            });
             if removed_list.is_empty() {
                 return false;
             }
@@ -456,12 +457,12 @@ impl Registry {
             if #[cfg(feature = "tracing")] {
                 tracing::debug!(
                     msg = "Removed callback",
-                    plugin = owner,
+                    plugin = namespace,
                     registration = registration.get()
                 );
             } else if #[cfg(feature = "logging")] {
                 log::debug!(
-                    "msg=\"Removed callback\" plugin={owner} registration={}",
+                    "msg=\"Removed callback\" plugin={namespace} registration={}",
                     registration.get()
                 );
             }
@@ -514,7 +515,7 @@ impl Registry {
         }
 
         for entry in entry_list {
-            let callee = Context::new(entry.owner, access);
+            let callee = Context::new(entry.namespace, access);
             let flow = match &entry.callback {
                 CallbackKind::Transform(callback) => callback.call(&callee, data),
                 CallbackKind::Observe(callback) => callback.call(&callee, data),
@@ -529,7 +530,7 @@ impl Registry {
                         if #[cfg(feature = "tracing")] {
                             tracing::warn!(
                                 msg = "Callback failed and let the dispatch continue",
-                                plugin = entry.owner,
+                                plugin = entry.namespace,
                                 error = ?error
                             );
                         } else if #[cfg(feature = "logging")] {
@@ -537,7 +538,7 @@ impl Registry {
                                 "msg=\"Callback failed and let the dispatch continue\" hook={} \
                                  plugin={} error={error:?}",
                                 hook.name(),
-                                entry.owner
+                                entry.namespace
                             );
                         } else {
                             let _ = error;
@@ -549,7 +550,7 @@ impl Registry {
                         if #[cfg(feature = "tracing")] {
                             tracing::trace!(
                                 msg = "Callback stopped the dispatch",
-                                plugin = entry.owner,
+                                plugin = entry.namespace,
                                 failed = result.is_err()
                             );
                         } else if #[cfg(feature = "logging")] {
@@ -557,7 +558,7 @@ impl Registry {
                                 "msg=\"Callback stopped the dispatch\" hook={} plugin={} \
                                  failed={}",
                                 hook.name(),
-                                entry.owner,
+                                entry.namespace,
                                 result.is_err()
                             );
                         }
@@ -571,26 +572,26 @@ impl Registry {
 
     // ---- functions ------------------------------------------------------------------------
 
-    /// Publish `function` under `owner`'s name, callable as `owner::name`.
+    /// Publish `function` in `namespace`, callable as `namespace::name`.
     pub(crate) fn export(
         &self,
-        owner: &'static str,
+        namespace: &'static str,
         name: &str,
         function: Arc<dyn ApiFn>,
     ) -> Result<RegistrationId> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         {
             let mut guard = self.write_apis();
-            if guard.contains(owner, name) {
+            if guard.contains(namespace, name) {
                 return Err(Error::Duplicate {
-                    plugin: owner.into(),
+                    namespace: namespace.into(),
                     function: name.into(),
                 });
             }
             let mut next = (**guard).clone();
             next.insert(ApiEntry {
                 id,
-                owner,
+                namespace,
                 name: name.to_string(),
                 function,
             });
@@ -598,23 +599,24 @@ impl Registry {
         }
         cfg_if! {
             if #[cfg(feature = "tracing")] {
-                tracing::debug!(msg = "Exported function", plugin = owner, function = name, registration = id);
+                tracing::debug!(msg = "Exported function", plugin = namespace, function = name, registration = id);
             } else if #[cfg(feature = "logging")] {
                 log::debug!(
-                    "msg=\"Exported function\" plugin={owner} function={name} registration={id}"
+                    "msg=\"Exported function\" plugin={namespace} function={name} registration={id}"
                 );
             }
         }
         Ok(RegistrationId::new(id))
     }
 
-    /// Withdraw one of `owner`'s functions. Returns whether it was there.
-    pub(crate) fn unexport(&self, owner: &str, registration: RegistrationId) -> bool {
+    /// Withdraw one of `namespace`'s functions. Returns whether it was there.
+    pub(crate) fn unexport(&self, namespace: &str, registration: RegistrationId) -> bool {
         {
             let mut guard = self.write_apis();
             let mut next = (**guard).clone();
-            let removed_list =
-                next.take_matching(|entry| entry.owner == owner && entry.id == registration.get());
+            let removed_list = next.take_matching(|entry| {
+                entry.namespace == namespace && entry.id == registration.get()
+            });
             if removed_list.is_empty() {
                 return false;
             }
@@ -626,12 +628,12 @@ impl Registry {
             if #[cfg(feature = "tracing")] {
                 tracing::debug!(
                     msg = "Withdrew function",
-                    plugin = owner,
+                    plugin = namespace,
                     registration = registration.get()
                 );
             } else if #[cfg(feature = "logging")] {
                 log::debug!(
-                    "msg=\"Withdrew function\" plugin={owner} registration={}",
+                    "msg=\"Withdrew function\" plugin={namespace} registration={}",
                     registration.get()
                 );
             }
@@ -654,7 +656,7 @@ impl Registry {
             for entry in &guard.function_list {
                 if entry.name == name {
                     return Err(Error::Duplicate {
-                        plugin: "host".into(),
+                        namespace: "host".into(),
                         function: name.into(),
                     });
                 }
@@ -662,7 +664,7 @@ impl Registry {
             let mut next = (**guard).clone();
             next.function_list.push(ApiEntry {
                 id,
-                owner: "host",
+                namespace: "host",
                 name: name.to_string(),
                 function,
             });
@@ -702,10 +704,10 @@ impl Registry {
         };
         let mut found = None;
         if let Ok(index) = snapshot
-            .owner_list
+            .namespace_list
             .binary_search_by(|slot| slot.name.cmp(plugin))
         {
-            for entry in &snapshot.owner_list[index].function_list {
+            for entry in &snapshot.namespace_list[index].function_list {
                 if entry.name == function {
                     found = Some(entry);
                     break;
@@ -717,7 +719,7 @@ impl Registry {
             None => return Err(self.why_missing(plugin, function)),
         };
 
-        let callee = Context::new(entry.owner, access);
+        let callee = Context::new(entry.namespace, access);
         entry.function.call(&callee, args)
     }
 
@@ -773,7 +775,7 @@ impl Registry {
                 });
             }
         };
-        let callee = Context::new(entry.owner, access);
+        let callee = Context::new(entry.namespace, access);
         entry.function.call(&callee, args)
     }
 
@@ -800,16 +802,16 @@ impl Registry {
         *guard = Arc::new(next);
     }
 
-    /// Take every callback and every exported function owned by `owner` out of the tables.
+    /// Take every callback and every exported function filed under `namespace` out of the tables.
     ///
     /// This is step one of the stop sequence: drain, quiesce ([`Drained::wait`]), drop, *then* stop
     /// the plugin. Calling the plugin's `stop` before the returned [`Drained`] has been waited on
     /// lets a callback or a function run against state the plugin has already torn down.
-    pub(crate) fn drain(&self, owner: &'static str) -> Drained {
+    pub(crate) fn drain(&self, namespace: &'static str) -> Drained {
         let hooks_previous = {
             let mut guard = self.write_hooks();
             let mut next = (**guard).clone();
-            let removed_list = next.take_matching(|entry| entry.owner == owner);
+            let removed_list = next.take_matching(|entry| entry.namespace == namespace);
             let filter = next.filter();
             let previous = std::mem::replace(&mut *guard, Arc::new(next));
             self.filter.store(filter, Ordering::Relaxed);
@@ -818,7 +820,7 @@ impl Registry {
         let apis_previous = {
             let mut guard = self.write_apis();
             let mut next = (**guard).clone();
-            let removed_list = next.take_matching(|entry| entry.owner == owner);
+            let removed_list = next.take_matching(|entry| entry.namespace == namespace);
             let previous = std::mem::replace(&mut *guard, Arc::new(next));
             (previous, removed_list)
         };
@@ -826,14 +828,14 @@ impl Registry {
         cfg_if! {
             if #[cfg(feature = "tracing")] {
                 tracing::debug!(
-                    msg = "Drained an owner from the tables",
-                    plugin = owner,
+                    msg = "Drained a namespace from the tables",
+                    plugin = namespace,
                     callback_count = hooks_previous.1.len(),
                     function_count = apis_previous.1.len()
                 );
             } else if #[cfg(feature = "logging")] {
                 log::debug!(
-                    "msg=\"Drained an owner from the tables\" plugin={owner} \
+                    "msg=\"Drained a namespace from the tables\" plugin={namespace} \
                      callback_count={} function_count={}",
                     hooks_previous.1.len(),
                     apis_previous.1.len()
@@ -845,7 +847,7 @@ impl Registry {
             apis: apis_previous.0,
             callback_list: hooks_previous.1,
             function_list: apis_previous.1,
-            owner,
+            namespace,
         }
     }
 }
@@ -861,7 +863,7 @@ pub(crate) struct Drained {
     apis: Arc<ApiTable>,
     callback_list: Vec<Entry>,
     function_list: Vec<ApiEntry>,
-    owner: &'static str,
+    namespace: &'static str,
 }
 
 impl Drained {
@@ -878,17 +880,17 @@ impl Drained {
     /// Block until nothing can still be running one of these, then drop them.
     ///
     /// Returns [`Error::StopTimeout`] if `timeout` passes first — in which case **nothing is
-    /// dropped**. They stay out of the tables, so the owner can receive nothing new and is harmless
+    /// dropped**. They stay out of the tables, so the plugin can receive nothing new and is harmless
     /// where it is; retry, or leave it drained.
     ///
-    /// A caller must not call the owner's `stop` until this has returned `Ok`.
+    /// A caller must not call the plugin's `stop` until this has returned `Ok`.
     pub(crate) fn wait(self, timeout: Duration) -> Result<()> {
         let deadline = Instant::now() + timeout;
         let mut backoff = Duration::from_micros(50);
         loop {
             // Nothing can clone these snapshots any more: they are out of the tables, so the counts
             // only fall. Reaching one means we hold the last reference and every dispatch or call
-            // that could see this owner's entries has finished.
+            // that could see this namespace's entries has finished.
             let outstanding =
                 (Arc::strong_count(&self.hooks) - 1) + (Arc::strong_count(&self.apis) - 1);
             if outstanding == 0 {
@@ -899,14 +901,14 @@ impl Drained {
                     if #[cfg(feature = "tracing")] {
                         tracing::warn!(
                             msg = "Timed out draining in-flight calls",
-                            plugin = self.owner,
+                            plugin = self.namespace,
                             outstanding = outstanding
                         );
                     } else if #[cfg(feature = "logging")] {
                         log::warn!(
                             "msg=\"Timed out draining in-flight calls\" plugin={} \
                              outstanding={outstanding}",
-                            self.owner
+                            self.namespace
                         );
                     }
                 }
@@ -920,16 +922,16 @@ impl Drained {
         cfg_if! {
             if #[cfg(feature = "tracing")] {
                 tracing::debug!(
-                    msg = "Dropped a drained owner's entries",
-                    plugin = self.owner,
+                    msg = "Dropped a drained namespace's entries",
+                    plugin = self.namespace,
                     callback_count = self.callback_list.len(),
                     function_count = self.function_list.len()
                 );
             } else if #[cfg(feature = "logging")] {
                 log::debug!(
-                    "msg=\"Dropped a drained owner's entries\" plugin={} \
+                    "msg=\"Dropped a drained namespace's entries\" plugin={} \
                      callback_count={} function_count={}",
-                    self.owner,
+                    self.namespace,
                     self.callback_list.len(),
                     self.function_list.len()
                 );

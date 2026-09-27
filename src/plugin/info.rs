@@ -119,7 +119,7 @@ impl ConfigSpec {
 /// Everything a plugin reports about itself.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Info {
-    /// The plugin's identity: what its registrations are tagged with and how other plugins address
+    /// The plugin's identity: the namespace its registrations are filed under and how other plugins address
     /// its functions.
     ///
     /// **Filled in by the runtime**, not by the plugin author. A plugin's name is its filename,

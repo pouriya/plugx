@@ -63,8 +63,8 @@ use std::time::Duration;
 /// How long [`Host::stop`] waits for in-flight dispatches before giving up.
 pub const DEFAULT_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The name the application's own registrations and functions are tagged with.
-const HOST_NAME: &str = "host";
+/// The namespace the application's own registrations and functions are filed under.
+const HOST_NAMESPACE: &str = "host";
 
 /// The name a plugin is asked for its [`Info`] under, before it has reported one.
 const UNNAMED: &str = "";
@@ -306,9 +306,9 @@ impl Host {
     /// The application's own context.
     ///
     /// Hand it to anything of yours that fires hooks, and use it to register the application's own
-    /// callbacks. Registrations made through it are tagged `host` and are never drained.
+    /// callbacks. Registrations made through it land in the `host` namespace and are never drained.
     pub const fn context(&self) -> Context {
-        Context::direct(HOST_NAME, self.registry)
+        Context::direct(HOST_NAMESPACE, self.registry)
     }
 
     /// Publish one of the application's functions, callable by any plugin as
@@ -389,7 +389,7 @@ impl Host {
     /// Start one plugin with `config`.
     ///
     /// Its dependencies must already be started. The plugin registers its hook callbacks and
-    /// exports its functions during this call, all tagged with its own name.
+    /// exports its functions during this call, all in its own namespace.
     pub fn start(&mut self, name: &str, config: Value) -> Result<()> {
         let index = self.position(name)?;
         if self.plugin_list[index].state == State::Started {

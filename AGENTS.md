@@ -82,8 +82,9 @@ process.
   plugin that wants one on a background thread keeps its own copy.
 - **A plugin's name is its identity, and its filename is its name.** The *runtime* parses it, by
   its own format's rules, because the extension is what chose that runtime: `libauth.so` is `auth`,
-  leaked once at load, compared as a `&'static str`, unique per host. Registrations are tagged with
-  it and `plugin::function` addresses through it. One library is one plugin.
+  leaked once at load, compared as a `&'static str`, unique per host. It is the namespace its
+  registrations are filed under and the one `plugin::function` addresses through. One library is one
+  plugin.
 - **A runtime stamps the name into `Info::name`, and that is how a host learns it.** `build` hands
   back plugins and nothing else; the host asks each one for its `Info` through a context named `""`,
   because the name is what it is asking for. A runtime that forgets to stamp produces plugins the
@@ -93,7 +94,7 @@ process.
   operation appends a symbol; a host treats a missing one as unsupported.
 - **`host_data` is per plugin, not per host.** The cdylib runtime leaks one `PluginData` — registry
   plus leaked name — for each library it loads and puts that pointer in the context. It is what
-  answers "who is calling", so no ABI entry takes an `owner`: a plugin cannot tag a registration
+  answers "who is calling", so no ABI entry takes a namespace: a plugin cannot file a registration
   with somebody else's name, because it never gets to say a name at all.
 - **A failure travels with the call that failed.** Whoever fails writes a message into the
   `error_out` it was handed and the other side copies it out on return, in both directions. There

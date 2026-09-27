@@ -10,7 +10,7 @@
 //!
 //! Code linked into the application fires hooks with [`run`], which reads this program's registry
 //! out of the one slot a [`Host`] fills. Code inside a loaded plugin is handed a [`Context`] on
-//! every call and reaches the host through that. Through a context an owner can:
+//! every call and reaches the host through that. Through a context a plugin can:
 //!
 //! - fire hooks — [`run`](Context::run)
 //! - register and remove hook callbacks — [`on_transform`](Context::on_transform),
